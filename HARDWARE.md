@@ -132,7 +132,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 
 | Area | Result |
 |---|---|
-| 4× A53, RAM | Works |
+| 4× A53, RAM | Works. **CPU capped at stock's 1209.6 MHz** (960 / 1094.4 / 1209.6): this chip is fused as speed bin 2, while mainline's msm8917 table goes to 1401.6 MHz with no voltages and no CPU supply control. Our DTS overrides `cpu_opp_table` and `pll_opp_table`; the A53 PLL measures 1209600000 Hz under full load |
 | Main panel (ST7701S, DSI) | **Works with a real driver:** MSM DRM + DSI + generated `panel-cat-s22flip-st7701s`, plus Adreno 308 probing (see "Main display" below). Early boot uses lk2nd's framebuffer |
 | USB gadget (NCM + ACM), telnet | Works once the PM8916 charger module provides extcon |
 | Keypad, d-pad, soft/function keys, volume up/down, power, lid | All work. Programmable key = `KEY_NUMERIC_B`; `KEY_NUMERIC_A` (r4c4) is unidentified |
@@ -210,9 +210,8 @@ Notes:
 ## Next steps
 
 Proposed before BENC:
-1. Cap the CPU at stock's 1.2096 GHz. The mainline MSM8917 OPP table goes up to 1.4016 GHz on this QM215.
-2. Suspend/resume (s2idle) and idle-state power.
-3. Audio: ADSP + qdsp6 sound card on the PM8916 codec.
+1. Suspend/resume (s2idle) and idle-state power.
+2. Audio: ADSP + qdsp6 sound card on the PM8916 codec.
    - Earpiece: PM8916 EAR output, the stock "handset" path; no extra driver needed.
    - Microphones and the headset jack/button.
    - The loudspeaker last: AW88194A on QUIN MI2S, which has no mainline driver.
