@@ -41,6 +41,15 @@ for pass in 1 2 3; do
 done
 log "modules loaded: $(wc -l < /proc/modules)"
 
+# Outer display: nothing modesets it on its own, so unblank it (which
+# enables the pipeline) and replace the bootloader splash with ours.
+for fb in /sys/class/graphics/fb*; do
+	[ "$(cat $fb/name 2>/dev/null)" = "panel-mipi-dbid" ] || continue
+	echo 0 > $fb/blank
+	cat /usr/share/s22/ext-splash.rgb565 > /dev/${fb##*/}
+	log "outer display on ${fb##*/}"
+done
+
 # USB gadget: NCM networking + ACM serial console
 modprobe libcomposite
 G=/sys/kernel/config/usb_gadget/g1

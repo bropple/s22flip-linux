@@ -22,7 +22,7 @@ Firmware: `LTE_S02113.11_N_S22Flip_0.030.03` (V30), Android 11 (Go), kernel 4.9.
 | Function | Hardware | Bus / location | Mainline status |
 |---|---|---|---|
 | Main display | 480×640 @ 60 Hz, MIPI DSI (`mdss_dsi_ctrl0`). The exact panel is not yet known. DT candidates for a VGA panel: `gc9503v_jutai_vga_video`, `st7701s_vga_video`, `rouxian_st7701s_boe_video`, `jd9161z_boe_ips_video`. | DSI0 | MDSS/DSI are supported. The panel driver must be generated from the downstream DTB (e.g. with linux-mdss-dsi-panel-driver-generator). **Needs boot.img.** |
-| Outer display | 128×128 @ 30 Hz, driven by MDSS SPI (`qcom,mdss_spi`). The DT also has an `st7789v2_qvga` node, but the actual 128×128 config probably comes from a dtbo overlay. | `spi@7af6000` (spi6), `mdss-spi-client` | Use `panel-mipi-dbi-spi`, as on the Nokia 2780. Needs the init sequence from DTB/dtbo. |
+| Outer display | 128×128 @ 30 Hz, driven by MDSS SPI (`qcom,mdss_spi`). Its config comes from the stock dtbo overlay (entry 27), node `qcom,mdss_spi_st7789v2_qvga_cmd`. Despite the name, it is 128×128 and ST7735S-class. | `spi@7af6000` (spi6), CS1 | **Working** with `panel-mipi-dbi-spi`; see "Outer display" below. |
 | Touch (main display) | Chipsemi CHSC (`chsc_cap_touch`, driver `semi_touch`) | i2c-3 (`i2c@78b7000`) addr **0x2e**. Unpopulated alternatives in DT: goodix@14, tsc@24, focaltech@38. | **No mainline driver.** Needs a port. |
 | Keypad | `gpio-matrix-keypad`, plus `gpio-keys` (vol_up), PM8916 PON (power) and RESIN | GPIO | Mainline. Row/column GPIOs and keymap need the DTB. |
 | Hall sensor (lid) | `hall_sensor` GPIO input | GPIO | Use `gpio-keys` with `SW_LID`. |
@@ -140,16 +140,28 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | WCNSS + WCN3610 | Firmware boots; `wcn36xx` reports `firmware API 1.5.1.2, 41 stations`; `wlan0` and `hci0` present |
 | eMMC, microSD | Detected |
 | WUSB3801 Type-C | First probe at boot fails silently (likely an I²C NACK early in boot); a manual rebind registers `port0` (sink/device, partner detected) |
-| Outer display | Still shows the bootloader's splash (backlight GPIO 12 left on); not driven yet |
+| Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
 | Modem, Venus | Need firmware the ramdisk doesn't carry (`modem.mbn` is 43 MB; lk2nd's ramdisk window is ~37 MB) |
 
 lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0x83400000`, ramdisk at `0x83600000`. The ramdisk must end below the reserved region at `0x85b00000`.
+
+## Outer display (working, 2026-10-03)
+
+- **Controller:** ST7735S-class, 128×128 RGB565. Stock calls it "st7789v2 qvga", but the init sequence is ST7735S-style (B1–B4, C0–C5, E0/E1, FC).
+- **Bus:** BLSP2 QUP2 SPI (`blsp2_spi2`), **chip select 1** (GPIO 22), 50 MHz. Only CS1 is muxed; CS0 (GPIO 47) is left alone. Data pins are GPIO 20/21/23.
+- **Control lines:** D/C on GPIO 68, reset on GPIO 125, TE on GPIO 124 (unused).
+- **Supplies:** L17 at 2.85 V and L6 at 1.8 V.
+- **Backlight:** GPIO 12, as a plain `gpio-backlight`. Stock dims it with pulse counting. Stock's DT also lists GPIO 12 as the WUSB3801 reset; that's unverified.
+- **Init sequence:** converted by `tools/mkmipidbi.py` from stock's `qcom,mdss-spi-on-command`, whose records are `delay_after_ms, len, cmd, params...`. The result is the `panel-mipi-dbi` firmware `cat,s22flip-ext-panel.bin`.
+- **Window:** visible area starts at column 2, row 3, set via `hback-porch`/`vback-porch`. Stock's `MADCTL 0xCC` gives the correct colour order and an image that's upright with the lid closed.
+- **Driver must be built in.** SPI devices only advertise `spi:s22flip-ext-panel`, which matches no module alias, so the module never auto-loads.
+- **Nothing enables the pipeline by default** (fbcon only uses fb0). The bring-up init finds fb1 by name, unblanks it and draws `initramfs/splash/ext-splash.rgb565`.
 
 ## Next steps
 
 1. A root filesystem (e.g. postmarketOS) on the microSD card, for real userspace (`iw`, ModemManager) and to load the modem firmware.
 2. ST7701S DSI panel driver: generate it from the `qcom,mdss_dsi_st7701s_vga_video` node of the live DT.
-3. Outer 128×128 SPI display with `panel-mipi-dbi-spi` (or `st7735r`).
+3. Outer display extras: pulse-count backlight dimming, and using it as a status or console display.
 4. Fix the WUSB3801 first-probe failure.
 5. Audio (PM8916 codec; AW88194A speaker amp needs a driver), cameras, touch.
 

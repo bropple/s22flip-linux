@@ -26,6 +26,10 @@ echo "blacklist msm" > "$ROOT/etc/modprobe.d/blacklist.conf"
 FW=qcom/qm215/cat/s22flip
 mkdir -p "$ROOT/lib/firmware/$FW"
 cp "$TOP/firmware/lib/firmware/$FW"/{wcnss.mbn,WCNSS_qcom_wlan_nv.bin} "$ROOT/lib/firmware/$FW/"
+# Outer display init sequence (tools/mkmipidbi.py from the stock DT)
+cp "$TOP/firmware/lib/firmware/cat,s22flip-ext-panel.bin" "$ROOT/lib/firmware/"
+mkdir -p "$ROOT/usr/share/s22"
+cp "$TOP/initramfs/splash/ext-splash.rgb565" "$ROOT/usr/share/s22/"
 
 (cd "$ROOT" && find . | cpio -o -H newc --quiet | gzip -9) > "$OUT/initramfs.cpio.gz"
 

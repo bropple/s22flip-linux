@@ -4,8 +4,9 @@ Notes, tools and bring-up scripts for running a mainline Linux kernel on the
 **Cat S22 Flip** (Qualcomm QM215 + PM8916, 2 GB RAM, 480×640 ST7701S DSI panel,
 128×128 SPI outer display, WCN3610 WiFi/BT).
 
-It boots: four cores, console on the main panel, USB networking with a shell,
-the full keypad, lid switch, charging, WiFi and Bluetooth firmware up.
+It boots: four cores, console on the main panel, the 128×128 outer display,
+USB networking with a shell, the full keypad, lid switch, charging, and the WiFi
+and Bluetooth firmware.
 See [HARDWARE.md](HARDWARE.md) for the hardware survey, everything learned
 about the bootloader, and the current status.
 
@@ -31,7 +32,14 @@ about the bootloader, and the current status.
    fastboot flash dtbo dtbo-cat-s22flip.img
    fastboot flash boot lk2nd.img
    ```
-3. Build a kernel from the `s22flip` branch with the postmarketOS `msm89x7` config
+3. Generate the outer display's init sequence from your own phone's stock
+   `dtbo.img` (from the OTA or the `dtbo` partition). Entry 27 holds the panel node:
+   ```
+   mkdtboimg dump dtbo.img -b entry
+   tools/mkmipidbi.py entry.27 /fragment@31/__overlay__/qcom,mdss_spi_st7789v2_qvga_cmd \
+       firmware/lib/firmware/cat,s22flip-ext-panel.bin
+   ```
+4. Build a kernel from the `s22flip` branch with the postmarketOS `msm89x7` config
    plus `arch/arm64/configs/s22flip.config`, then build the bring-up image with
    `initramfs/build.sh` and boot it from lk2nd's fastboot:
    ```
@@ -50,7 +58,8 @@ To go back to Android, flash the stock `dtbo` and `boot` images for your firmwar
 | `tools/imgpatch.py` | Apply Android OTA `IMGDIFF2` patches off-device (rebuilds v30 images from the v29 full OTA + v30 incremental) |
 | `tools/backup_partitions.sh` | Stream every partition except `userdata` off a rooted phone, with SHA-1 checks against the device |
 | `tools/s22sh` | Run a command on the bring-up initramfs over USB serial |
-| `initramfs/` | Busybox bring-up initramfs (RAM only; never mounts the eMMC) and the boot image build script |
+| `tools/mkmipidbi.py` | Convert a stock `qcom,mdss-spi-on-command` into a `panel-mipi-dbi` init-sequence firmware file |
+| `initramfs/` | Busybox bring-up initramfs (RAM only; never mounts the eMMC), the boot image build script, and the outer-display splash (`splash/make-splash.sh`) |
 
 Firmware is not included. The signed modem, WCNSS, ADSP and Venus images must
 come from your own phone (the `modem` partition) or its OTA package.
