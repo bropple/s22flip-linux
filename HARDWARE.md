@@ -137,6 +137,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | USB gadget (NCM + ACM), telnet | Works once the PM8916 charger module provides extcon |
 | Keypad, d-pad, soft/function keys, volume up/down, power, lid | All work. Programmable key = `KEY_NUMERIC_B`; `KEY_NUMERIC_A` (r4c4) is unidentified |
 | Keypad debounce | Stock 3 ms gives double presses (domes chatter up to ~35 ms); 30 ms in our DTS |
+| Suspend (s2idle) | **Works** (4 of 4). Wakes on RTC alarm, power key, lid and keypad (volume up is also a wake source). All four cores and the CPU cluster power down while asleep. Both displays blank and come back (console on the main panel, splash on the outer one), and the USB network link reconnects by itself. Not yet checked: WiFi/modem across suspend, battery drain while asleep (needs the phone unplugged). `mem` is the same s2idle; there's no deeper state |
 | Charger (LBC) + BMS | Charging, capacity reported |
 | WCNSS + WCN3610 | **WiFi works end to end:** scan (2.4 GHz only), WPA2-PSK/CCMP association on 802.11n, DHCP, DNS, NTP and HTTPS. Tested with `wpa_supplicant` from a RAM-only Alpine root. `hci0` registers too (Bluetooth not tested yet) |
 | eMMC, microSD | Detected |
@@ -210,8 +211,7 @@ Notes:
 ## Next steps
 
 Proposed before BENC:
-1. Suspend/resume (s2idle) and idle-state power.
-2. Audio: ADSP + qdsp6 sound card on the PM8916 codec.
+1. Audio: ADSP + qdsp6 sound card on the PM8916 codec.
    - Earpiece: PM8916 EAR output, the stock "handset" path; no extra driver needed.
    - Microphones and the headset jack/button.
    - The loudspeaker last: AW88194A on QUIN MI2S, which has no mainline driver.
