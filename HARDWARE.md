@@ -141,7 +141,8 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | eMMC, microSD | Detected |
 | WUSB3801 Type-C | First probe at boot fails silently (likely an I²C NACK early in boot); a manual rebind registers `port0` (sink/device, partner detected) |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
-| Modem, Venus | Need firmware the ramdisk doesn't carry (`modem.mbn` is 43 MB; lk2nd's ramdisk window is ~37 MB) |
+| Modem | **Works without a SIM** (see "Modem" below): boots, QMI over QRTR, IMEI and firmware revision match stock, goes online, measures LTE cells. Registration, calls and data need a SIM |
+| Venus | Needs `venus.mbn`, which isn't in the ramdisk |
 
 lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0x83400000`, ramdisk at `0x83600000`. The ramdisk must end below the reserved region at `0x85b00000`.
 
@@ -173,6 +174,25 @@ Tools then run with `chroot /alpine`, using Alpine's `PATH` (`/usr/sbin:/usr/bin
 Notes:
 - Alpine's `wpa_supplicant` has no `-f`, and `wpa_passphrase` adds no control socket, so start it with `-C /run/wpa_supplicant`.
 - The phone boots with its clock at 1970, so TLS fails until `ntpd -q -p pool.ntp.org` runs.
+
+## Modem (2026-10-03)
+
+How it was brought up (RAM only; nothing is written to the eMMC):
+1. Fetch `mba.mbn` and `modem.mbn` (squashed from the stock `modem` partition) over USB into `/lib/firmware/qcom/qm215/cat/s22flip/`.
+2. Read `modemst1`, `modemst2`, `fsc` and `fsg` from the eMMC into RAM files named `modem_fs1`, `modem_fs2`, `modem_fsc` and `modem_fsg` (`tools/phone/efs-to-ram.sh`).
+3. Run `rmtfs -o <that dir> -r -v` (Alpine `rmtfs`) in directory mode. `-r` means it never writes storage.
+4. `echo start > /sys/class/remoteproc/remoteproc1/state` (`tools/phone/modem-up.sh`).
+
+Results:
+- **Boot:** `MBA booted without debug policy, loading mpss` → `remote processor 4080000.remoteproc is now up`. The modem reads its EFS through rmtfs. The rmtfs shared memory at `0x92100000` (mainline dtsi) works; stock allocated the same 1.5 MB dynamically.
+- **QMI:** QRTR node 0 publishes the full set (DMS, NAS, WDS, UIM, Voice, WMS, ...). `qmicli -d qrtr://0` works. No `pd-mapper` or `tqftpserv` was needed.
+- **Identity:** IMEI present and identical to fastboot's. Revision `MPSS.JO.3.3-00078-SDM439_GENNS_PACK-1.419755.4.425674.1`, the same as stock.
+- **Operating mode:** reports `shutting-down` after boot. `--dms-set-operating-mode=online` brings it online.
+- **Without a SIM:** UIM reports `no-atr-received`, and network scan is refused (`InvalidOperation`). About 20 s after going online it selects LTE and reports serving and neighbour cell measurements (RSRP around −108 to −113 dBm), so the RF and calibration work.
+
+Notes:
+- Android's rmtfs kept syncing `modemst1` after the backup was taken. That copy differs, and the newer one is saved as `backup/partitions/modemst1.after-android-2026-10-03.img`.
+- The host's ModemManager probes the gadget's ACM serial port and garbles that shell. Use telnet (`tools/s22sh` now does).
 
 ## Next steps
 
