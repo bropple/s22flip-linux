@@ -140,7 +140,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | Charger (LBC) + BMS | Charging, capacity reported |
 | WCNSS + WCN3610 | **WiFi works end to end:** scan (2.4 GHz only), WPA2-PSK/CCMP association on 802.11n, DHCP, DNS, NTP and HTTPS. Tested with `wpa_supplicant` from a RAM-only Alpine root. `hci0` registers too (Bluetooth not tested yet) |
 | eMMC, microSD | Detected |
-| WUSB3801 Type-C | First probe at boot fails silently (likely an I²C NACK early in boot); a manual rebind registers `port0` (sink/device, partner detected) |
+| WUSB3801 Type-C | **Works.** Registers `port0` (sink/device), partner detected, 3.0 A. Root cause of the old first-probe failure: the **first transfer on I²C bus 0 after boot is lost** (NACKed, `-ENXIO`) whatever the address or timing, while SDA/SCL read idle-high before and after; it's a QUP controller first-activation glitch, not the PMIC or the chip. Fix in our fork: buses marked `cat,first-transfer-lost` (only `blsp2_i2c1`) get one dummy 1-byte read to the reserved address 0x7f in `i2c-qup` probe, before any client sees the bus; the WUSB3801 now initializes on its first try (3 of 3 boots, the last without any driver retry). An earlier driver-side retry (5 × 10 ms on `-ENXIO`) was committed and then reverted; it's in the `s22flip` history if the problem shows up elsewhere. Datasheet notes: ENB is active low, so stock's `wusb3801,reset-gpio = 12` (really the outer backlight) is bogus |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
 | Modem | **Works without a SIM** (see "Modem" below): boots, QMI over QRTR, IMEI and firmware revision match stock, goes online, measures LTE cells. Registration, calls and data need a SIM |
 | Venus | Needs `venus.mbn`, which isn't in the ramdisk |
@@ -153,7 +153,7 @@ lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0
 - **Bus:** BLSP2 QUP2 SPI (`blsp2_spi2`), **chip select 1** (GPIO 22), 50 MHz. Only CS1 is muxed; CS0 (GPIO 47) is left alone. Data pins are GPIO 20/21/23.
 - **Control lines:** D/C on GPIO 68, reset on GPIO 125, TE on GPIO 124 (unused).
 - **Supplies:** L17 at 2.85 V and L6 at 1.8 V.
-- **Backlight:** GPIO 12, as a plain `gpio-backlight`. Stock dims it with pulse counting. Stock's DT also lists GPIO 12 as the WUSB3801 reset; that's unverified.
+- **Backlight:** GPIO 12, on/off only (`gpio-backlight`). Stock's DT says `bl_gpio_pulse`, but the stock kernel's `mdss_spi_panel_bl_ctrl` (disassembled from the V30 boot.img) only drives the GPIO high or low; turning it off can be delayed by an alarm timer. A test with mainline's 32-step `ktd253` pulse driver produced no visible dimming at any level, so there is no dimming to support. Stock's DT also lists GPIO 12 as the WUSB3801 reset, which the datasheet rules out (ENB is active low).
 - **Init sequence:** converted by `tools/mkmipidbi.py` from stock's `qcom,mdss-spi-on-command`, whose records are `delay_after_ms, len, cmd, params...`. The result is the `panel-mipi-dbi` firmware `cat,s22flip-ext-panel.bin`.
 - **Window:** visible area starts at column 2, row 3, set via `hback-porch`/`vback-porch`. Stock's `MADCTL 0xCC` gives the correct colour order and an image that's upright with the lid closed.
 - **Driver must be built in.** SPI devices only advertise `spi:s22flip-ext-panel`, which matches no module alias, so the module never auto-loads.
@@ -209,11 +209,27 @@ Notes:
 
 ## Next steps
 
-1. Outer display extras: pulse-count backlight dimming, and using it as a status display.
-2. Fix the WUSB3801 first-probe failure.
-3. Audio (PM8916 codec, then the AW88194A speaker amp, which needs a driver), cameras, touch.
-4. Modem with a SIM: registration, SMS, data over BAM-DMUX/rmnet, ModemManager.
-5. Then a proper OS: BENCkernel-CAT and BENCtix-CAT (Arch Linux ARM + OpenRC), with the root filesystem on the eMMC `userdata` partition.
+Proposed before BENC:
+1. Cap the CPU at stock's 1.2096 GHz. The mainline MSM8917 OPP table goes up to 1.4016 GHz on this QM215.
+2. Suspend/resume (s2idle) and idle-state power.
+3. Audio: ADSP + qdsp6 sound card on the PM8916 codec.
+   - Earpiece: PM8916 EAR output, the stock "handset" path; no extra driver needed.
+   - Microphones and the headset jack/button.
+   - The loudspeaker last: AW88194A on QUIN MI2S, which has no mainline driver.
+
+Proposed as BENCkernel-CAT updates:
+- **Touchscreen:** Chipsemi CHSC (needs a driver).
+- **Sensors on BLSP1 I2C-4,** which the ADSP owns on stock: accelerometer, light/proximity, pressure.
+- **Cameras:**
+  - rear GC5035 + DW9714 (CAMSS/CCI)
+  - flash LED
+  - front GC02M2 (needs a driver)
+- **Smaller items:**
+  - Venus (enable `venus_mem`, add firmware)
+  - Bluetooth pairing, keypad backlight check, FM radio
+  - RTC offset handling (the PMIC RTC reads 1970)
+
+Then BENCkernel-CAT and BENCtix-CAT (Arch Linux ARM + OpenRC), with the root filesystem on the eMMC `userdata` partition. Modem-with-SIM work comes after that.
 
 ## Contents of `dump/`
 
