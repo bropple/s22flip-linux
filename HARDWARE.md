@@ -137,7 +137,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | Keypad, d-pad, soft/function keys, volume up/down, power, lid | All work. Programmable key = `KEY_NUMERIC_B`; `KEY_NUMERIC_A` (r4c4) is unidentified |
 | Keypad debounce | Stock 3 ms gives double presses (domes chatter up to ~35 ms); 30 ms in our DTS |
 | Charger (LBC) + BMS | Charging, capacity reported |
-| WCNSS + WCN3610 | Firmware boots; `wcn36xx` reports `firmware API 1.5.1.2, 41 stations`; `wlan0` and `hci0` present |
+| WCNSS + WCN3610 | **WiFi works end to end:** scan (2.4 GHz only), WPA2-PSK/CCMP association on 802.11n, DHCP, DNS, NTP and HTTPS. Tested with `wpa_supplicant` from a RAM-only Alpine root. `hci0` registers too (Bluetooth not tested yet) |
 | eMMC, microSD | Detected |
 | WUSB3801 Type-C | First probe at boot fails silently (likely an I²C NACK early in boot); a manual rebind registers `port0` (sink/device, partner detected) |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
@@ -156,6 +156,23 @@ lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0
 - **Window:** visible area starts at column 2, row 3, set via `hback-porch`/`vback-porch`. Stock's `MADCTL 0xCC` gives the correct colour order and an image that's upright with the lid closed.
 - **Driver must be built in.** SPI devices only advertise `spi:s22flip-ext-panel`, which matches no module alias, so the module never auto-loads.
 - **Nothing enables the pipeline by default** (fbcon only uses fb0). The bring-up init finds fb1 by name, unblanks it and draws `initramfs/splash/ext-splash.rgb565`.
+
+## RAM-only Alpine toolbox (2026-10-03)
+
+The busybox initramfs stays PID 1, keeping USB networking and the shell. An Alpine aarch64 root built by `tools/mkrootfs.sh` (minirootfs plus `iw`, `wpa_supplicant`, `wireless-regdb` and friends; about 11 MB compressed) is served over HTTP on the USB link. The phone streams it into a tmpfs:
+
+```
+mkdir -p /alpine && mount -t tmpfs -o size=512m tmpfs /alpine
+wget -q -O - http://172.16.42.2:8022/alpine-s22.tar.gz | tar -xz -C /alpine
+for m in proc sys dev dev/pts; do mount -o bind /$m /alpine/$m; done
+cp /alpine/lib/firmware/regulatory.db* /lib/firmware/
+```
+
+Tools then run with `chroot /alpine`, using Alpine's `PATH` (`/usr/sbin:/usr/bin:/sbin:/bin`). Nothing is written to the eMMC or SD card.
+
+Notes:
+- Alpine's `wpa_supplicant` has no `-f`, and `wpa_passphrase` adds no control socket, so start it with `-C /run/wpa_supplicant`.
+- The phone boots with its clock at 1970, so TLS fails until `ntpd -q -p pool.ntp.org` runs.
 
 ## Next steps
 

@@ -5,8 +5,8 @@ Notes, tools and bring-up scripts for running a mainline Linux kernel on the
 128×128 SPI outer display, WCN3610 WiFi/BT).
 
 It boots: four cores, console on the main panel, the 128×128 outer display,
-USB networking with a shell, the full keypad, lid switch, charging, and the WiFi
-and Bluetooth firmware.
+USB networking with a shell, the full keypad, lid switch, charging, and WiFi
+(scan, WPA2, DHCP and HTTPS from a RAM-only Alpine userspace).
 See [HARDWARE.md](HARDWARE.md) for the hardware survey, everything learned
 about the bootloader, and the current status.
 
@@ -58,6 +58,7 @@ To go back to Android, flash the stock `dtbo` and `boot` images for your firmwar
 | `tools/imgpatch.py` | Apply Android OTA `IMGDIFF2` patches off-device (rebuilds v30 images from the v29 full OTA + v30 incremental) |
 | `tools/backup_partitions.sh` | Stream every partition except `userdata` off a rooted phone, with SHA-1 checks against the device |
 | `tools/s22sh` | Run a command on the bring-up initramfs over USB serial |
+| `tools/mkrootfs.sh` | Build the Alpine aarch64 toolbox root (WiFi tools etc.) that the phone fetches into RAM over USB |
 | `tools/mkmipidbi.py` | Convert a stock `qcom,mdss-spi-on-command` into a `panel-mipi-dbi` init-sequence firmware file |
 | `initramfs/` | Busybox bring-up initramfs (RAM only; never mounts the eMMC), the boot image build script, and the outer-display splash (`splash/make-splash.sh`) |
 
