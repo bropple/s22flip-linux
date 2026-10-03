@@ -132,7 +132,8 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 
 | Area | Result |
 |---|---|
-| 4× A53, RAM, console on the main panel (`lk2nd.pass-simplefb`) | Works |
+| 4× A53, RAM | Works |
+| Main panel (ST7701S, DSI) | **Works with a real driver:** MSM DRM + DSI + generated `panel-cat-s22flip-st7701s`, plus Adreno 308 probing (see "Main display" below). Early boot uses lk2nd's framebuffer |
 | USB gadget (NCM + ACM), telnet | Works once the PM8916 charger module provides extcon |
 | Keypad, d-pad, soft/function keys, volume up/down, power, lid | All work. Programmable key = `KEY_NUMERIC_B`; `KEY_NUMERIC_A` (r4c4) is unidentified |
 | Keypad debounce | Stock 3 ms gives double presses (domes chatter up to ~35 ms); 30 ms in our DTS |
@@ -194,13 +195,25 @@ Notes:
 - Android's rmtfs kept syncing `modemst1` after the backup was taken. That copy differs, and the newer one is saved as `backup/partitions/modemst1.after-android-2026-10-03.img`.
 - The host's ModemManager probes the gadget's ACM serial port and garbles that shell. Use telnet (`tools/s22sh` now does).
 
+## Main display (working, 2026-10-03)
+
+- **Driver:** `panel-cat-s22flip-st7701s`, generated with linux-mdss-dsi-panel-driver-generator from the stock node `qcom,mdss_dsi_st7701s_vga_video` (`-r vdd -r vddio`). It lives in `drivers/gpu/drm/panel/msm89x7-generated/`. 480×640 @ 60 Hz, 2 lanes, RGB888, burst video mode; reset on GPIO 60, active low.
+- **lk2nd handoff:** the DTS panel node uses `compatible = "cat,s22flip-panel"`. lk2nd replaces it with the detected panel (`cat,s22flip-st7701s`), which the driver matches.
+- **Supplies (per stock):**
+  - DSI `vdda` and `vddio` on L6, 1.8 V. That differs from msm8916 boards, which use L2 at 1.2 V for `vdda`.
+  - Panel `vdd` on L17 (2.85 V) and `vddio` on L6.
+  - DSI PHY `vddio` on L6, in LDO mode.
+- **Backlight:** `pwm-backlight` on the PM8916 LPG, routed to MPP4. **The LPG reaches MPP4 over DTEST2, not DTEST1** as on the msm8916 reference designs: the bootloader leaves MPP4 MODE_CTL at `0x1a` (digital output, source 5 = DTEST2). With DTEST1 the panel worked but stayed dark. Confirmed by booting with the backlight path untouched and reading the registers through regmap debugfs. Brightness control works (100 µs period, as stock).
+- **GPU:** MSM DRM also brings up the Adreno 308 (`a300_pm4.fw`/`a300_pfp.fw`).
+- **Console:** the boot logos (Tux) disappear when MSM DRM replaces lk2nd's framebuffer.
+
 ## Next steps
 
-1. A root filesystem (e.g. postmarketOS) on the microSD card, for real userspace (`iw`, ModemManager) and to load the modem firmware.
-2. ST7701S DSI panel driver: generate it from the `qcom,mdss_dsi_st7701s_vga_video` node of the live DT.
-3. Outer display extras: pulse-count backlight dimming, and using it as a status or console display.
-4. Fix the WUSB3801 first-probe failure.
-5. Audio (PM8916 codec; AW88194A speaker amp needs a driver), cameras, touch.
+1. Outer display extras: pulse-count backlight dimming, and using it as a status display.
+2. Fix the WUSB3801 first-probe failure.
+3. Audio (PM8916 codec, then the AW88194A speaker amp, which needs a driver), cameras, touch.
+4. Modem with a SIM: registration, SMS, data over BAM-DMUX/rmnet, ModemManager.
+5. Then a proper OS: BENCkernel-CAT and BENCtix-CAT (Arch Linux ARM + OpenRC), with the root filesystem on the eMMC `userdata` partition.
 
 ## Contents of `dump/`
 

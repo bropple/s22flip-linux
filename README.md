@@ -4,7 +4,8 @@ Notes, tools and bring-up scripts for running a mainline Linux kernel on the
 **Cat S22 Flip** (Qualcomm QM215 + PM8916, 2 GB RAM, 480×640 ST7701S DSI panel,
 128×128 SPI outer display, WCN3610 WiFi/BT).
 
-It boots: four cores, console on the main panel, the 128×128 outer display,
+It boots: four cores, the main ST7701S panel on a real DSI driver (with
+backlight control and the Adreno 308 GPU), the 128×128 outer display,
 USB networking with a shell, the full keypad, lid switch, charging, and WiFi
 (scan, WPA2, DHCP and HTTPS from a RAM-only Alpine userspace), and the modem
 (boots, QMI, goes online and measures LTE cells; not tested with a SIM).

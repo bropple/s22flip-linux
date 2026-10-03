@@ -18,9 +18,9 @@ cp -a "$TOP/stage/lib/modules" "$ROOT/lib/"
 find "$ROOT/lib/modules" -name '*.ko.zst' -exec zstd -q -d --rm {} \;
 depmod -b "$ROOT" "$KREL"
 
-# msm DRM would take over the display from lk2nd's simple-framebuffer before
-# there is a panel driver, so keep it from loading.
-echo "blacklist msm" > "$ROOT/etc/modprobe.d/blacklist.conf"
+# GPU microcode for the Adreno 308 (msm DRM drives both the GPU and the panel)
+mkdir -p "$ROOT/lib/firmware/qcom"
+cp "$TOP/firmware/lib/firmware/qcom"/a300_{pm4,pfp}.fw "$ROOT/lib/firmware/qcom/"
 
 # WiFi firmware only; modem.mbn (43 MB) does not fit lk2nd's ramdisk window
 FW=qcom/qm215/cat/s22flip
