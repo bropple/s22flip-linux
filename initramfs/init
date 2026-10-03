@@ -1,0 +1,109 @@
+#!/bin/busybox sh
+# Bring-up initramfs for the Cat S22 Flip.
+# Never mounts or writes to the eMMC: everything lives in RAM.
+
+/bin/busybox --install -s /bin
+ln -s bin /sbin
+export PATH=/bin
+
+mkdir -p /proc /sys /dev /tmp /run
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+mount -t configfs configfs /sys/kernel/config
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+# Load modules for devices that appear later (e.g. WiFi after WCNSS boots)
+echo '$MODALIAS=.* 0:0 660 @modprobe -q "$MODALIAS"' > /etc/mdev.conf
+echo /bin/mdev > /proc/sys/kernel/hotplug
+
+log() {
+	echo "s22-init: $*" > /dev/kmsg
+	echo "s22-init: $*" > /dev/tty0 2>/dev/null
+}
+
+log "started on $(uname -r)"
+
+# Kernel request_module() runs this for on-demand loads (e.g. usbfunc:ncm)
+echo /bin/modprobe > /proc/sys/kernel/modprobe
+
+# Load modules for every device present; repeat to catch devices that
+# only appear once their parent driver has loaded.
+coldplug() {
+	find /sys/devices -name modalias -exec cat {} + 2>/dev/null | sort -u |
+		while read -r alias; do modprobe -q "$alias" 2>/dev/null; done
+}
+for pass in 1 2 3; do
+	coldplug
+	sleep 1
+done
+log "modules loaded: $(wc -l < /proc/modules)"
+
+# USB gadget: NCM networking + ACM serial console
+modprobe libcomposite
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p $G/strings/0x409 $G/configs/c.1/strings/0x409
+echo 0x18D1 > $G/idVendor
+echo 0xD001 > $G/idProduct
+echo "Cat" > $G/strings/0x409/manufacturer
+echo "S22 Flip (mainline bring-up)" > $G/strings/0x409/product
+echo "s22flip-bringup" > $G/strings/0x409/serialnumber
+echo "NCM + ACM" > $G/configs/c.1/strings/0x409/configuration
+mkdir -p $G/functions/ncm.usb0 $G/functions/acm.usb0
+ln -s $G/functions/ncm.usb0 $G/configs/c.1/
+ln -s $G/functions/acm.usb0 $G/configs/c.1/
+
+udc=""
+for i in $(seq 1 30); do
+	udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+	[ -n "$udc" ] && break
+	sleep 1
+done
+if [ -n "$udc" ]; then
+	echo "$udc" > $G/UDC
+	log "USB gadget bound to $udc"
+else
+	log "no UDC found; USB gadget not started"
+	# The screen is the only output without USB, so show why
+	{
+		echo "--- deferred:"
+		cat /sys/kernel/debug/devices_deferred 2>/dev/null ||
+			{ mount -t debugfs debugfs /sys/kernel/debug && cat /sys/kernel/debug/devices_deferred; }
+		echo "--- dmesg (usb/phy/extcon/lbc/errors):"
+		dmesg | grep -iE "usb|phy|extcon|lbc|ci_hdrc|udc|fail|error" | tail -n 15
+	} > /dev/tty0 2>&1
+fi
+
+ifconfig lo 127.0.0.1 up
+for i in $(seq 1 10); do
+	ifconfig usb0 >/dev/null 2>&1 && break
+	sleep 1
+done
+ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up
+cat > /tmp/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface usb0
+max_leases 1
+lease_file /tmp/udhcpd.leases
+option subnet 255.255.255.0
+EOF
+touch /tmp/udhcpd.leases
+udhcpd /tmp/udhcpd.conf
+telnetd -l /bin/sh -p 23
+log "telnet 172.16.42.1 (or serial on the ACM port)"
+
+# Root shell on the USB serial port, restarted whenever it exits
+(
+	while true; do
+		[ -e /dev/ttyGS0 ] && setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'
+		sleep 1
+	done
+) &
+
+log "ready"
+while true; do
+	sleep 3600
+done

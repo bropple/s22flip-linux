@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Run a shell command on the S22 bring-up initramfs and print its output.
+
+Uses the USB ACM serial shell (/dev/ttyACM0).
+usage: s22sh 'command' [timeout_seconds]
+"""
+import os
+import re
+import select
+import sys
+import termios
+import time
+import tty
+
+DEV = os.environ.get("S22_TTY", "/dev/ttyACM0")
+MARK = "__S22SH_DONE__"
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    cmd = sys.argv[1]
+    timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 30
+    fd = os.open(DEV, os.O_RDWR | os.O_NOCTTY)
+    tty.setraw(fd)
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    # Marker is split in the command so the echoed command line can't match it
+    os.write(fd, f"\n{cmd}; echo; echo __S22SH_''DONE__\n".encode())
+    buf = b""
+    end = time.time() + timeout
+    while MARK.encode() not in buf and time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.5)
+        if r:
+            buf += os.read(fd, 65536)
+    os.close(fd)
+    out = buf.decode(errors="replace").replace("\r", "")
+    out = re.sub(r"\x1b\[[0-9;]*m", "", out)  # busybox ls colours
+    out = out.split(MARK, 1)[0]
+    lines = out.split("\n")
+    # drop the echoed command and prompts
+    lines = [l for l in lines if "__S22SH_''DONE__" not in l and l.strip() not in ("~ #", "/ #")]
+    # the echoed command may wrap onto several lines; skip everything up to its end
+    for i, l in enumerate(lines):
+        if l.endswith("echo; echo") or l.endswith("echo; echo __S22SH_''DONE__"):
+            lines = lines[i + 1:]
+            break
+    lines = [l for l in lines if not l.startswith("~ # ")]
+    sys.stdout.write("\n".join(lines).strip("\n") + "\n")
+    if MARK.encode() not in buf:
+        sys.exit(f"timed out after {timeout}s")
+
+
+if __name__ == "__main__":
+    main()

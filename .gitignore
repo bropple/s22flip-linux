@@ -1,0 +1,14 @@
+# Device-specific and proprietary data must never be committed
+backup/
+dump/
+ota/
+firmware/
+testimg/
+out/
+build/
+stage/
+*.img
+*.mbn
+*.mdt
+*.b[0-9][0-9]
+*.zip
