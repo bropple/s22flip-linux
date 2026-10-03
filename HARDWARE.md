@@ -144,6 +144,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | WUSB3801 Type-C | **Works.** Registers `port0` (sink/device), partner detected, 3.0 A. Root cause of the old first-probe failure: the **first transfer on I²C bus 0 after boot is lost** (NACKed, `-ENXIO`) whatever the address or timing, while SDA/SCL read idle-high before and after; it's a QUP controller first-activation glitch, not the PMIC or the chip. Fix in our fork: buses marked `cat,first-transfer-lost` (only `blsp2_i2c1`) get one dummy 1-byte read to the reserved address 0x7f in `i2c-qup` probe, before any client sees the bus; the WUSB3801 now initializes on its first try (3 of 3 boots, the last without any driver retry). An earlier driver-side retry (5 × 10 ms on `-ENXIO`) was committed and then reverted; it's in the `s22flip` history if the problem shows up elsewhere. Datasheet notes: ENB is active low, so stock's `wusb3801,reset-gpio = 12` (really the outer backlight) is bogus |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
 | Modem | **Works without a SIM** (see "Modem" below): boots, QMI over QRTR, IMEI and firmware revision match stock, goes online, measures LTE cells. Registration, calls and data need a SIM |
+| Audio (PM8916 codec) | **Earpiece and both built-in mics work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`. Headset jack untested; loudspeaker (AW88194A) has no driver yet |
 | Venus | Needs `venus.mbn`, which isn't in the ramdisk |
 
 lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0x83400000`, ramdisk at `0x83600000`. The ramdisk must end below the reserved region at `0x85b00000`.
@@ -208,13 +209,26 @@ Notes:
 - **GPU:** MSM DRM also brings up the Adreno 308 (`a300_pm4.fw`/`a300_pfp.fw`).
 - **Console:** the boot logos (Tux) disappear when MSM DRM replaces lk2nd's framebuffer.
 
+## Audio (2026-10-03)
+
+The ADSP boots `adsp.mbn` (shipped in the bring-up ramdisk) and the mainline QDSP6 sound card (`qcom,msm8916-qdsp6-sndcard`) comes up as `cat-s22flip`. The PM8916 analog codec handles the earpiece, headset and mics, behind the LPASS digital codec. Playback uses Primary MI2S (`hw:0,0`, MultiMedia1) and capture uses Tertiary MI2S (`hw:0,1`, MultiMedia2).
+
+| Path | Mixer settings (`amixer -c0 cset name=...`) |
+|---|---|
+| Earpiece | `PRI_MI2S_RX Audio Mixer MultiMedia1` = 1, `RX1 MIX1 INP1` = RX1, `EAR_S` = Switch, `RX1 Digital Volume` = 84 (0 dB) |
+| Capture (both) | `MultiMedia2 Mixer TERT_MI2S_TX` = 1, `CIC1 MUX`/`CIC2 MUX` = AMIC. DEC1 feeds the left channel and DEC2 the right |
+| Mic 1: under the keypad, near **#** (AMIC1) | `DEC1 MUX` = ADC1, gain `ADC1 Volume` |
+| Mic 2: the hole above the outer display (AMIC3) | `ADC2 MUX` = INP3, `DEC1/2 MUX` = ADC2 or ADC3 (identical data), gain **`ADC3 Volume`**. AMIC3 is amplified by the TX3 stage, not TX2 |
+
+The mic locations were found with a tap test, recording both mics in stereo. At `ADC1/3 Volume` = 4, speech held as for a call measured about −44 dBFS on mic 1. Final gains belong in a BENCtix-CAT UCM profile.
+
+**USB drop fixed along the way:** `qm215-pm8916.dtsi` gave the USB PHY `v1p8`/`v3p3` supplies, but the 28nm femtophy driver reads `vdda1p8`/`vdda3p3`. With the wrong names the PHY never held L7/L13 on, and switching the codec's mic bias (also on L13) off cut USB. Both are fixed in our kernel branch.
+
 ## Next steps
 
 Proposed before BENC:
-1. Audio: ADSP + qdsp6 sound card on the PM8916 codec.
-   - Earpiece: PM8916 EAR output, the stock "handset" path; no extra driver needed.
-   - Microphones and the headset jack/button.
-   - The loudspeaker last: AW88194A on QUIN MI2S, which has no mainline driver.
+1. The loudspeaker: AW88194A on QUIN MI2S, which has no mainline driver. This is the last item before BENC.
+2. Headset jack and button test (needs wired earbuds).
 
 Proposed as BENCkernel-CAT updates:
 - **Touchscreen:** Chipsemi CHSC (needs a driver).
