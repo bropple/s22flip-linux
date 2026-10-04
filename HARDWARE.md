@@ -144,7 +144,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | WUSB3801 Type-C | **Works.** Registers `port0` (sink/device), partner detected, 3.0 A. Root cause of the old first-probe failure: the **first transfer on I²C bus 0 after boot is lost** (NACKed, `-ENXIO`) whatever the address or timing, while SDA/SCL read idle-high before and after; it's a QUP controller first-activation glitch, not the PMIC or the chip. Fix in our fork: buses marked `cat,first-transfer-lost` (only `blsp2_i2c1`) get one dummy 1-byte read to the reserved address 0x7f in `i2c-qup` probe, before any client sees the bus; the WUSB3801 now initializes on its first try (3 of 3 boots, the last without any driver retry). An earlier driver-side retry (5 × 10 ms on `-ENXIO`) was committed and then reverted; it's in the `s22flip` history if the problem shows up elsewhere. Datasheet notes: ENB is active low, so stock's `wusb3801,reset-gpio = 12` (really the outer backlight) is bogus |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
 | Modem | **Works without a SIM** (see "Modem" below): boots, QMI over QRTR, IMEI and firmware revision match stock, goes online, measures LTE cells. Registration, calls and data need a SIM |
-| Sensors (ADSP) | **Accelerometer streams through the ADSP** (see "Sensors through the ADSP"); light/proximity and pressure detected. The sensor bus is locked to the ADSP |
+| Sensors (ADSP) | **Accelerometer, proximity, light and pressure all work** through the ADSP with our own daemon `s22-sensord` (see "Sensors through the ADSP"). The sensor bus is locked to the ADSP |
 | Audio | **Earpiece, both built-in mics and the loudspeaker work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`, PM8916 codec, AW88194A amp on Quinary MI2S with our own driver, speaker protection DSP running. Headset jack untested |
 | Venus | Needs `venus.mbn`, which isn't in the ramdisk |
 
@@ -269,9 +269,19 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
   - Indication **0x03** carries TLV 4 items: sensor ID, data type, then x/y/z as s32 **Q16 m/s²**, then a u32 timestamp in 32768 Hz ticks, then flags, quality and sensitivity (u8 each).
 - **Accelerometer axes**, measured by tilting: the sensor reports the direction of gravity (flat face up: z = −9.7). In Android/Linux convention, **X = sensor Y, Y = sensor X, Z = −sensor Z**.
 - **The proximity sensor** sits near the earpiece; it's for turning the screen off at the ear.
+  - **PROX_LIGHT data type 0** = proximity: x = near (non-zero) or far, y = raw count (about 240 open, about 2,000–4,000 covered).
+  - **Data type 1** = light: x = lux in Q16, from 0 covered to about 15 indoors, saturating at 32,767 under a flashlight.
+  - **PRESSURE data type 0** = hPa in Q16 (about 927). It has no data type 1.
+- **`tools/s22-sensord`** does all of this in one static daemon:
+  - provides the registry and time services
+  - finds the ADSP's SMGR by QRTR lookup, re-requests streams if the ADSP restarts, and ignores the WCNSS stub
+  - streams accel/proximity/light/pressure (default 10/5/2/1 Hz; `-a -p -l -b`, 0 disables a sensor)
+  - outputs a uinput **"S22 Flip accelerometer"** (`INPUT_PROP_ACCELEROMETER`, milli-g, resolution 1000, Linux axes, for iio-sensor-proxy), a uinput **"S22 Flip proximity"** switch (`SW_FRONT_PROXIMITY`), and files in `/run/s22-sensors/` (`accel`, `proximity`, `light`, `pressure`)
+  - is tested from a cold boot with nothing else running
 - **Tools:**
   - `tools/qmisend.c`: send a raw QMI request or listen as a service, over QRTR
-  - `tools/sns-reg-serve.c`: the registry server
+  - `tools/sns-reg-serve.c`: the standalone registry server
+- `tools/s22-sensord.c`: the sensor daemon
   - `tools/sns-reg-groups.py`: extracts the group table
 
   `sns.reg` and the group table come from the phone and are not redistributed.
