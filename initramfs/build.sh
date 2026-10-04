@@ -22,10 +22,10 @@ depmod -b "$ROOT" "$KREL"
 mkdir -p "$ROOT/lib/firmware/qcom"
 cp "$TOP/firmware/lib/firmware/qcom"/a300_{pm4,pfp}.fw "$ROOT/lib/firmware/qcom/"
 
-# WiFi and ADSP (audio) firmware; modem.mbn (43 MB) does not fit lk2nd's ramdisk window
+# WiFi, ADSP (audio) and loudspeaker amp firmware; modem.mbn (43 MB) does not fit lk2nd's ramdisk window
 FW=qcom/qm215/cat/s22flip
 mkdir -p "$ROOT/lib/firmware/$FW"
-cp "$TOP/firmware/lib/firmware/$FW"/{wcnss.mbn,WCNSS_qcom_wlan_nv.bin,adsp.mbn} "$ROOT/lib/firmware/$FW/"
+cp "$TOP/firmware/lib/firmware/$FW"/{wcnss.mbn,WCNSS_qcom_wlan_nv.bin,adsp.mbn,aw881xx_acf.bin} "$ROOT/lib/firmware/$FW/"
 # Outer display init sequence (tools/mkmipidbi.py from the stock DT)
 cp "$TOP/firmware/lib/firmware/cat,s22flip-ext-panel.bin" "$ROOT/lib/firmware/"
 mkdir -p "$ROOT/usr/share/s22"
