@@ -1,0 +1,117 @@
+#!/bin/sh
+# Init for the stock-kernel reference image: the stock 4.9 kernel with a
+# RAM-only Alpine armv7 root instead of Android. Nothing on the eMMC is
+# mounted or written. USB RNDIS networking and telnet at 172.16.42.1, as in
+# the mainline bring-up image.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+log() { echo "stockref: $*" > /dev/kmsg; }
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+# As Android's init does: a crashed subsystem (modem, ADSP...) restarts on
+# its own instead of taking the whole SoC down with it
+for f in /sys/bus/msm_subsys/devices/*/restart_level; do
+	echo related > "$f"
+done
+
+# Progress for bring-up without a log: N short buzzes = stage N reached,
+# one long buzz = no USB controller (see buzz calls below)
+vib() {
+	echo "$1" > /sys/class/timed_output/vibrator/enable 2>/dev/null
+	if [ -e /sys/class/leds/vibrator/activate ]; then
+		echo "$1" > /sys/class/leds/vibrator/duration
+		echo 1 > /sys/class/leds/vibrator/activate
+	fi
+}
+buzz() {
+	i=0
+	while [ $i -lt "$1" ]; do
+		vib 150
+		sleep 0.5
+		i=$((i + 1))
+	done
+}
+
+# Every LED except the camera flash on (keypad light, screen backlight)
+for l in /sys/class/leds/*; do
+	case "$l" in *flash*|*torch*|*vibrator*) continue ;; esac
+	cat "$l/max_brightness" > "$l/brightness" 2>/dev/null
+done
+buzz 1
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /tmp /run
+# The Android kernel keeps the pty master inside devpts
+mount -t devpts -o ptmxmode=0666,gid=5,mode=0620 devpts /dev/pts
+[ -e /dev/ptmx ] || ln -s pts/ptmx /dev/ptmx
+mount -t tmpfs tmpfs /tmp
+mount -t configfs configfs /sys/kernel/config
+mount -t debugfs debugfs /sys/kernel/debug
+log "init started"
+
+# Diagnostic: with STOCKREF_NO_USB set (kernel command line), skip USB and
+# buzz once every 10 s, to tell a USB crash from a timed one
+if grep -q STOCKREF_NO_USB /proc/cmdline; then
+	log "USB skipped; heartbeat every 10 s"
+	while true; do
+		sleep 10
+		buzz 1
+	done
+fi
+
+# USB gadget: RNDIS networking (the stock kernel crashes with NCM)
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p $G/strings/0x409 $G/configs/c.1/strings/0x409
+echo 0x18D1 > $G/idVendor
+echo 0xD001 > $G/idProduct
+echo "Cat" > $G/strings/0x409/manufacturer
+echo "S22 Flip (stock kernel reference)" > $G/strings/0x409/product
+echo "s22flip-stockref" > $G/strings/0x409/serialnumber
+echo "RNDIS" > $G/configs/c.1/strings/0x409/configuration
+mkdir -p $G/functions/rndis.usb0
+ln -s $G/functions/rndis.usb0 $G/configs/c.1/
+
+udc=""
+for i in $(seq 1 30); do
+	udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+	[ -n "$udc" ] && break
+	sleep 1
+done
+if [ -n "$udc" ]; then
+	echo "$udc" > $G/UDC
+	log "USB gadget bound to $udc"
+	sleep 1
+	buzz 2
+else
+	log "no UDC found"
+	vib 1000
+fi
+log "udc: $(ls /sys/class/udc 2>&1 | tr '\n' ' ') net: $(ls /sys/class/net | tr '\n' ' ')"
+
+ifconfig lo 127.0.0.1 up
+ifname=$(cat $G/functions/rndis.usb0/ifname 2>/dev/null)
+[ -n "$ifname" ] || ifname=usb0
+for i in $(seq 1 10); do
+	ifconfig "$ifname" >/dev/null 2>&1 && break
+	sleep 1
+done
+ifconfig "$ifname" 172.16.42.1 netmask 255.255.255.0 up && { sleep 1; buzz 3; }
+cat > /tmp/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface $ifname
+max_leases 1
+lease_file /tmp/udhcpd.leases
+option subnet 255.255.255.0
+EOF
+touch /tmp/udhcpd.leases
+udhcpd /tmp/udhcpd.conf
+telnetd -l /bin/sh -p 23
+# Fallback shell without a pty (tools/s22sh with S22_PORT=2323)
+(while true; do nc -l -p 2323 -e /bin/sh; done) &
+log "telnet 172.16.42.1 on $ifname (raw shell on port 2323)"
+
+while true; do
+	sleep 3600
+done

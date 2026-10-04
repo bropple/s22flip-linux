@@ -144,7 +144,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | WUSB3801 Type-C | **Works.** Registers `port0` (sink/device), partner detected, 3.0 A. Root cause of the old first-probe failure: the **first transfer on I²C bus 0 after boot is lost** (NACKed, `-ENXIO`) whatever the address or timing, while SDA/SCL read idle-high before and after; it's a QUP controller first-activation glitch, not the PMIC or the chip. Fix in our fork: buses marked `cat,first-transfer-lost` (only `blsp2_i2c1`) get one dummy 1-byte read to the reserved address 0x7f in `i2c-qup` probe, before any client sees the bus; the WUSB3801 now initializes on its first try (3 of 3 boots, the last without any driver retry). An earlier driver-side retry (5 × 10 ms on `-ENXIO`) was committed and then reverted; it's in the `s22flip` history if the problem shows up elsewhere. Datasheet notes: ENB is active low, so stock's `wusb3801,reset-gpio = 12` (really the outer backlight) is bogus |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
 | Modem | **Works without a SIM** (see "Modem" below): boots, QMI over QRTR, IMEI and firmware revision match stock, goes online, measures LTE cells. Registration, calls and data need a SIM |
-| Audio | **Earpiece, both built-in mics and the loudspeaker work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`, PM8916 codec, AW88194 amp on Quinary MI2S with our own driver (DSP bypassed for now). Headset jack untested |
+| Audio | **Earpiece, both built-in mics and the loudspeaker work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`, PM8916 codec, AW88194A amp on Quinary MI2S with our own driver, speaker protection DSP running. Headset jack untested |
 | Venus | Needs `venus.mbn`, which isn't in the ramdisk |
 
 lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0x83400000`, ramdisk at `0x83600000`. The ramdisk must end below the reserved region at `0x85b00000`.
@@ -231,27 +231,30 @@ The amp is an Awinic AW88194 (chip ID 0x1806, product ID 1, DSP product ID 0x000
 - **Controls:** the I2S format follows `hw_params`. "Speaker Volume" works in 0.5 dB steps (0 to −96 dB) and starts at −12 dB while the DSP is bypassed.
 - **Playback:** `QUIN_MI2S_RX Audio Mixer MultiMedia1` = 1, then play on `hw:0,0`.
 
-**Speaker protection DSP, not working yet** (`dsp=1` module option, off by default). What's established:
+**Speaker protection DSP: works** (on by default; `dsp=0` bypasses it).
 
-- **Data loaded exactly as stock does:** firmware at DSP 0x8c00 (1020 words, verified word for word), config at 0x8600, `VCALB` at 0x866d. The `VCALB` value, 0x37f9, matches stock's log. The memory clock is on the oscillator while loading. Stock's own V1.8.0.2 kernel binary (disassembled) uses the same addresses and sequence.
-- **The DSP executes:** within 0.5 s of clearing `DSPBY` it rewrites the head of its config area (0x8600–0x8615) and 0x86ce in the same way every time.
-- **But it never looks healthy:** the watchdog register 0x42 stays 0, where stock reads it as non-zero ("dsp check pass"). The speaker-model words (`RE` 0x81a6, `TE` 0x81a8) stay 0 during real audio. Audio passes through unchanged with the DSP in the path.
-- **Ruled out:**
-  - the variant (DSP PID 0x0000 = `aw88194`)
-  - corrupt firmware, check timing, DSP memory being lost in power-down
-  - the PLL reference (BCK or WS)
-  - 16-bit/32fs vs stock's 24-bit/64fs on Quinary MI2S (tested both)
-  - I²C reliability
-  - stock's PLL "mode 2" fallback and post-load table replay
-- **Next step:** compare against a running stock system. Plan: RAM-boot the stock 32-bit kernel through lk2nd with our own initramfs, so nothing is written to the eMMC, and dump the amp's registers and DSP memory while its DSP passes the check.
+- **The trap:** the amp's register product ID (0x79) reads 1, which suggests an AW88194. But **the DSP is the AW88194A revision**: its own product ID at DSP address 0x1f80 reads 0x6e90.
+- **What happened with the AW88194 profile:** the DSP firmware loads and starts executing, but never comes up. The watchdog register 0x42 stays 0 and the speaker model is empty.
+- **What stock does:** it loads the AW88194 profile, reads the DSP product ID, then reloads the `aw88194A` profile.
+- **What our driver does:** it parses both profiles at probe. Once the PLL locks on the first stream, it reads the DSP ID and switches. 0x1f80 only reads back with the PLL running, which is why an early read returned 0x0000. It then loads the DSP firmware to 0x8c00, the config to 0x8600 and `VCALB` (0x37f9) to 0x866d, and checks that `WDT` is non-zero after enabling the DSP.
+- **Result during playback:** the state matches stock register for register: `SYSCTRL` 0x6440, `SYSST` 0x1311/0x3311, `WDT` counting, and the AGC registers 0x09/0x0a/0x0b = 0x5e69/0x0f06/0x0f06.
+- **Volume:** the default is stock's −4 dB, and the volume control writes the amp's `VOL` register. A BENCtix-CAT UCM profile should use "Speaker Volume" as the hardware playback volume.
+
+**How the reference was obtained: stock kernel, no Android** (`tools/mkstockref.sh`, `initramfs/stockref-init`).
+
+- **Boot image:** the stock v30 32-bit kernel with stock's SoC DTB (entry 12) plus the board overlay (`dtbo` entry 27) merged by `fdtoverlay`. The DTB is appended to the zImage, because lk2nd rejects a header-v2 DTB with "dtb not found". The root is an Alpine armv7 RAM-only root.
+- **Command line:** `panic=3 msm_poweroff.download_mode=0` makes a crash reboot back to lk2nd instead of entering Qualcomm crash-dump mode (05c6:900e).
+- **Init:** sets all subsystems to `restart_level=related`. USB networking has to be **RNDIS**, because the stock kernel crashes about 25 s after binding an NCM gadget. Telnet needs `/dev/ptmx` → `pts/ptmx`, and there's a raw `nc` shell on port 2323 (`S22_PORT=2323 tools/s22sh`).
+- **Audio stack:** Qualcomm's audio is vendor modules (`audio_apr`, `audio_adsp_loader`, `audio_q6`, `audio_platform`, codecs, `audio_machine_sdm450`). They are extracted from the `super` backup with `lpunpack` and `debugfs`, then loaded in `modules.load` order. Then `/sys/kernel/boot_adsp/boot`, `/dev/snd` nodes created by hand, and `QUIN_MI2S_RX Audio Mixer MultiMedia1` = 1.
+- **Reading the amp:** the stock driver's `reg` and `dsp_rw` sysfs files give its registers and DSP memory. Avoid reading its `dsp` file mid-stream: it dumps the whole firmware over I²C and stalls the audio.
+- **The eMMC** is never mounted or written.
 
 **USB drop fixed along the way:** `qm215-pm8916.dtsi` gave the USB PHY `v1p8`/`v3p3` supplies, but the 28nm femtophy driver reads `vdda1p8`/`vdda3p3`. With the wrong names the PHY never held L7/L13 on, and switching the codec's mic bias (also on L13) off cut USB. Both are fixed in our kernel branch.
 
 ## Next steps
 
 Proposed before BENC:
-1. Loudspeaker DSP (speaker protection): compare with a running stock kernel (see "Loudspeaker" above).
-2. Headset jack and button test (needs wired earbuds).
+1. Headset jack and button test (needs wired earbuds).
 
 Proposed as BENCkernel-CAT updates:
 - **Touchscreen:** Chipsemi CHSC (needs a driver).

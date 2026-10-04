@@ -12,6 +12,7 @@ import sys
 import time
 
 HOST = os.environ.get("S22_HOST", "172.16.42.1")
+PORT = int(os.environ.get("S22_PORT", "23"))
 MARK = "__S22SH_DONE__"
 
 
@@ -20,7 +21,7 @@ def main():
         sys.exit(__doc__)
     cmd = sys.argv[1]
     timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 30
-    s = socket.create_connection((HOST, 23), timeout=10)
+    s = socket.create_connection((HOST, PORT), timeout=10)
     s.settimeout(0.5)
     # The marker is split so the echoed command line can't match it
     s.sendall(f"{cmd}\necho {MARK[:6]}''{MARK[6:]}\nexit\n".encode())
