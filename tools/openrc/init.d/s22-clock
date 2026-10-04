@@ -1,0 +1,56 @@
+#!/sbin/openrc-run
+# The system clock from the PMIC RTC plus a stored offset.
+#
+# The PM8916 RTC keeps counting while the phone is off, but Linux cannot set
+# it (no allow-set-time; on Android a daemon kept an offset instead). So the
+# offset "real time minus RTC" is saved once the clock is known good (chrony
+# synced, or a clean shutdown after a sync) and the time is set from
+# RTC + offset at every boot, network or not.
+
+description="Set the clock from the RTC and a saved offset"
+
+RTC=/sys/class/rtc/rtc0/since_epoch
+OFFSET=/var/lib/s22-clock/offset
+
+depend() {
+	provide clock
+	need localmount
+	before chrony
+}
+
+synced() {
+	command -v chronyc >/dev/null &&
+		chronyc -n tracking 2>/dev/null | grep -q '^Leap status *: Normal'
+}
+
+save() {
+	local rtc
+	rtc=$(cat "$RTC") || return 1
+	checkpath -d -m 0755 "${OFFSET%/*}"
+	echo $(( $(date +%s) - rtc )) > "$OFFSET.new" && mv "$OFFSET.new" "$OFFSET"
+}
+
+start() {
+	ebegin "Setting the clock from the RTC"
+	local rtc off
+	rtc=$(cat "$RTC" 2>/dev/null)
+	off=$(cat "$OFFSET" 2>/dev/null)
+	if [ -n "$rtc" ] && [ -n "$off" ]; then
+		date -s "@$((rtc + off))" >/dev/null
+		eend $?
+	else
+		eend 0 "no saved offset yet; waiting for network time"
+	fi
+	# Save the offset once chrony has synced (in the background: up to an hour)
+	if command -v chronyc >/dev/null; then
+		(chronyc -n waitsync 120 0.5 0 30 && synced && save) >/dev/null 2>&1 &
+	fi
+}
+
+stop() {
+	if synced; then
+		ebegin "Saving the RTC offset"
+		save
+		eend $?
+	fi
+}

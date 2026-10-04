@@ -1,0 +1,3 @@
+# Extra options: report rates in Hz, 0 disables a sensor
+#   -a accelerometer (10)  -p proximity (5)  -l light (2)  -b pressure (1)
+SENSORD_ARGS=

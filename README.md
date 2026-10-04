@@ -41,6 +41,22 @@ it, plus the tools and bring-up scripts to run mainline Linux on it.
 | 🟡 | **USB host (OTG)** | Probably data-capable, but the phone cannot power the port |
 | ❌ | **Cameras, flash LED, video decoding (Venus), touchscreen, FM radio** | Not started |
 
+## Typing with 12 keys
+
+Real captures of the phone's screen. `s22-t9d` turns the keypad into a
+multi-tap keyboard for the console, with a small indicator in the corner for
+the mode, the candidates, and (at password prompts) a count of characters
+typed. [Keypad reference](docs/KEYPAD.md).
+
+<p align="center">
+<img src="docs/img/t9-keypad-demo.gif" width="480" alt="Typing a message and a password with the keypad">
+</p>
+<p align="center">
+<img src="docs/img/t9-shell-demo.gif" width="480" alt="Shell commands, nano and xxd typed on the keypad">
+</p>
+
+<sub>The second demo runs at a quicker tap rate (`-t 450 -l 350`) than the default.</sub>
+
 ## How it boots
 
 ```
@@ -93,6 +109,10 @@ walks through it step by step.
 | `tools/s22-sensord.c` | The sensor daemon: registry and time services for the ADSP, sensor streams as input devices and files |
 | `tools/sns-reg-serve.c`, `tools/qmisend.c`, `tools/sns-reg-groups.py` | Sensor-registry server, raw QMI tool, group-table extractor |
 | `tools/mkstockref.sh` | Build a stock-kernel reference image (for comparing against stock behaviour) |
+| `tools/s22-t9d.c` | Keypad text input: multi-tap letters, modes, Ctrl, a console indicator ([reference](docs/KEYPAD.md)) |
+| `tools/s22-lidd.c` | Main display off while the lid is closed |
+| `tools/s22-partguard` | Make the eMMC partitions a system does not need read-only, with eMMC power-on write protection |
+| `tools/openrc/` | OpenRC services for an installed system: partition guard, zram, clock, USB network, rmtfs, sensors, keypad, lid, outer display ([list](tools/openrc/README.md)) |
 
 > [!IMPORTANT]
 > **No firmware is included, and none should be shared.** The modem, WiFi,

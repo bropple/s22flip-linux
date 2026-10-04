@@ -199,11 +199,17 @@ lk2nd (boot partition)                     reads /extlinux/extlinux.conf
 - The modem's EFS: let `rmtfs` serve copies of `modemst1`, `modemst2`, `fsc`
   and `fsg` from files (`rmtfs -o DIR -s`) instead of writing the partitions.
 
+**Services:** [`tools/openrc/`](tools/openrc/README.md) has OpenRC services
+for the phone-specific parts: the partition guard below, rmtfs, sensors,
+keypad text input, the lid and the outer display, the USB network, zram, and
+a clock that survives reboots without a network.
+
 **Protect the rest of the eMMC from Linux.** Everything but `userdata` and
 `cache` can be made read-only at boot (`blockdev --setro`), and the eMMC's
 own *power-on* write protection (`mmc writeprotect user set pwron`, from
 mmc-utils) can lock whole 4 MiB groups until the next reset. Use power-on
-protection only; the other kinds are permanent.
+protection only; the other kinds are permanent. `tools/s22-partguard` does
+both, sparing `userdata`, `cache` and the backup GPT.
 
 ## Going back to Android
 
