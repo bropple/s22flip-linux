@@ -144,6 +144,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | WUSB3801 Type-C | **Works.** Registers `port0` (sink/device), partner detected, 3.0 A. Root cause of the old first-probe failure: the **first transfer on I²C bus 0 after boot is lost** (NACKed, `-ENXIO`) whatever the address or timing, while SDA/SCL read idle-high before and after; it's a QUP controller first-activation glitch, not the PMIC or the chip. Fix in our fork: buses marked `cat,first-transfer-lost` (only `blsp2_i2c1`) get one dummy 1-byte read to the reserved address 0x7f in `i2c-qup` probe, before any client sees the bus; the WUSB3801 now initializes on its first try (3 of 3 boots, the last without any driver retry). An earlier driver-side retry (5 × 10 ms on `-ENXIO`) was committed and then reverted; it's in the `s22flip` history if the problem shows up elsewhere. Datasheet notes: ENB is active low, so stock's `wusb3801,reset-gpio = 12` (really the outer backlight) is bogus |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
 | Modem | **Works without a SIM** (see "Modem" below): boots, QMI over QRTR, IMEI and firmware revision match stock, goes online, measures LTE cells. Registration, calls and data need a SIM |
+| Sensors (ADSP) | **Accelerometer streams through the ADSP** (see "Sensors through the ADSP"); light/proximity and pressure detected. The sensor bus is locked to the ADSP |
 | Audio | **Earpiece, both built-in mics and the loudspeaker work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`, PM8916 codec, AW88194A amp on Quinary MI2S with our own driver, speaker protection DSP running. Headset jack untested |
 | Venus | Needs `venus.mbn`, which isn't in the ramdisk |
 
@@ -250,6 +251,30 @@ The amp is an Awinic AW88194 (chip ID 0x1806, product ID 1, DSP product ID 0x000
 - **The eMMC** is never mounted or written.
 
 **USB drop fixed along the way:** `qm215-pm8916.dtsi` gave the USB PHY `v1p8`/`v3p3` supplies, but the 28nm femtophy driver reads `vdda1p8`/`vdda3p3`. With the wrong names the PHY never held L7/L13 on, and switching the codec's mic bias (also on L13) off cut USB. Both are fixed in our kernel branch.
+
+## Sensors through the ADSP (2026-10-04)
+
+The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x78b8000, GPIO 14/15), which the **secure firmware locks to the ADSP**. Enabling `blsp1_i2c4` in Linux resets the phone about 12 s into boot, even without `oops=panic`. So the sensors are only reachable through the ADSP's sensor manager (SMGR), as on stock. Everything below is clean-room, worked out from the phone's own binaries and live traffic. Leaked Qualcomm sources exist on GitHub, but none were used.
+
+- **Topology:** QRTR node 5 is the ADSP and node 7 is WCNSS. WCNSS advertises a stub "Sensor Manager" (256 v0) that just echoes requests; ignore it.
+- **What the ADSP needs:** a **sensor registry service** on the phone side: QMI service 0x10f (271), version 2, instance 0. It also needs the **time service 0x118 (280) v2, instance 50** to exist; it is never actually called. Stock's `sensors.qti` provides both.
+  - The ADSP reads about 60 registry groups with request **0x04** (TLV 0x01 = u16 group ID).
+  - The answer is TLV 0x02 = result (**u16 only, length 2**), TLV 0x03 = group ID, and TLV 0x04 = u16 count plus data.
+  - It also sends one request **0x01** (version), answered with TLV 0x03 = u32 46 and TLV 0x04 = u16 6.
+- **Registry data:** `/persist/sensors/sns.reg` is a flat image. The group table (u16 size, offset, ID triples) lives in `sensors.qti`. `tools/sns-reg-groups.py` extracts it from the phone's own binary; all 59 group answers stock gave in a trace match byte for byte.
+- **Result:** with `tools/sns-reg-serve` running, the ADSP publishes the real **SMGR, service 256 v1, instance 50 on node 5**, plus about 20 more sensor services. "All sensor info" (request 0x05) lists **ACCEL (ID 0), PROX_LIGHT (ID 40), PRESSURE (ID 30)**.
+- **Streaming:** SMGR request **0x02** (periodic report) takes:
+  - TLV 1 = report ID (u8), TLV 2 = action (1 = add), TLV 3 = rate in Hz (u16), TLV 4 = buffer factor (u8)
+  - TLV 5 = count (u8) plus 19-byte items: sensor ID, data type, sensitivity, decimation (u8 each), rate (u16), five u8 options, two u32 thresholds
+  - Indication **0x03** carries TLV 4 items: sensor ID, data type, then x/y/z as s32 **Q16 m/s²**, then a u32 timestamp in 32768 Hz ticks, then flags, quality and sensitivity (u8 each).
+- **Accelerometer axes**, measured by tilting: the sensor reports the direction of gravity (flat face up: z = −9.7). In Android/Linux convention, **X = sensor Y, Y = sensor X, Z = −sensor Z**.
+- **The proximity sensor** sits near the earpiece; it's for turning the screen off at the ear.
+- **Tools:**
+  - `tools/qmisend.c`: send a raw QMI request or listen as a service, over QRTR
+  - `tools/sns-reg-serve.c`: the registry server
+  - `tools/sns-reg-groups.py`: extracts the group table
+
+  `sns.reg` and the group table come from the phone and are not redistributed.
 
 ## Next steps
 
