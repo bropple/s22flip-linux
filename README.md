@@ -48,14 +48,18 @@ multi-tap keyboard for the console, with a small indicator in the corner for
 the mode, the candidates, and (at password prompts) a count of characters
 typed. [Keypad reference](docs/KEYPAD.md).
 
-<p align="center">
-<img src="docs/img/t9-keypad-demo.gif" width="480" alt="Typing a message and a password with the keypad">
-</p>
-<p align="center">
-<img src="docs/img/t9-shell-demo.gif" width="480" alt="Shell commands, nano and xxd typed on the keypad">
-</p>
+<table align="center">
+<tr>
+<td align="center"><img src="docs/img/t9-keypad-demo.gif" width="300" alt="Typing a message and a password with the keypad"></td>
+<td align="center"><img src="docs/img/t9-shell-demo.gif" width="300" alt="Shell commands, nano and xxd typed on the keypad"></td>
+</tr>
+<tr>
+<td align="center"><sub>A message, then a password: only a count of characters is shown</sub></td>
+<td align="center"><sub><code>ls</code>, nano, <code>cat</code>, <code>xxd</code> (at a quicker tap rate than the default)</sub></td>
+</tr>
+</table>
 
-<sub>The second demo runs at a quicker tap rate (`-t 450 -l 350`) than the default.</sub>
+Both are the whole 480×640 screen, the 60×40 console as you see it on the phone.
 
 ## How it boots
 
