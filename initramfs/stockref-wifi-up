@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stock WiFi in the stockref image (Qualcomm's prima driver, stock config),
+# for comparing against mainline wcn36xx. Nothing touches the eMMC.
+#   wifi-up CONF        CONF: a wpa_supplicant.conf
+set -e
+# Opening /dev/wcnss_wlan boots the WCNSS core; keep it open
+[ -e /tmp/wcnss.pid ] || { sleep 100000 3<>/dev/wcnss_wlan & echo $! > /tmp/wcnss.pid; sleep 6; }
+# Keep the whole kernel log from here on (prima's traces overrun dmesg)
+[ -e /tmp/kmsg.pid ] || { cat /proc/kmsg > /tmp/kmsg.log & echo $! > /tmp/kmsg.pid; }
+grep -q '^wlan ' /proc/modules || insmod /vendor/lib/modules/pronto_wlan.ko
+i=0; while [ ! -e /sys/class/net/wlan0 ] && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
+ip link set wlan0 up
+wpa_supplicant -B -i wlan0 -D nl80211 -c "$1"
+udhcpc -i wlan0 -q -t 15
+iw dev wlan0 link

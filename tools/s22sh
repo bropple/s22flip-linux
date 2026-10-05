@@ -14,6 +14,7 @@ import time
 HOST = os.environ.get("S22_HOST", "172.16.42.1")
 PORT = int(os.environ.get("S22_PORT", "23"))
 MARK = "__S22SH_DONE__"
+BEGIN = "__S22SH_BEGIN__"
 
 
 def main():
@@ -23,8 +24,9 @@ def main():
     timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 30
     s = socket.create_connection((HOST, PORT), timeout=10)
     s.settimeout(0.5)
-    # The marker is split so the echoed command line can't match it
-    s.sendall(f"{cmd}\necho {MARK[:6]}''{MARK[6:]}\nexit\n".encode())
+    # The markers are split so the echoed command lines can't match them
+    s.sendall(f"echo {BEGIN[:6]}''{BEGIN[6:]}; {cmd}\n"
+              f"echo {MARK[:6]}''{MARK[6:]}\nexit\n".encode())
     buf = b""
     end = time.time() + timeout
     while MARK.encode() not in buf and time.time() < end:
@@ -38,14 +40,14 @@ def main():
     s.close()
     out = re.sub(rb"\xff[\xfb-\xfe].|\xff[\xf0-\xfa]", b"", buf).decode(errors="replace")
     out = re.sub(r"\x1b\[[0-9;]*m", "", out).replace("\r", "")
+    # Output starts after the real BEGIN line. The shell may echo input
+    # all at once (before any output) or line by line (interleaved), so
+    # drop echoed marker lines and prompts wherever they land.
+    if f"\n{BEGIN}\n" in out:
+        out = out.split(f"\n{BEGIN}\n", 1)[1]
     out = out.split(MARK, 1)[0]
-    lines = out.split("\n")
-    # Drop everything up to and including the echoed command (it may wrap)
-    for i, line in enumerate(lines):
-        if f"{MARK[:6]}''{MARK[6:]}" in line:
-            lines = lines[i + 1:]
-            break
-    lines = [l for l in lines if not l.startswith("~ # ")]
+    lines = [l for l in out.split("\n")
+             if not l.startswith("~ # ") and f"{MARK[:6]}''" not in l]
     sys.stdout.write("\n".join(lines).strip("\n") + "\n")
     if MARK.encode() not in buf:
         sys.exit(f"timed out after {timeout}s")

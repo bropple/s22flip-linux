@@ -27,7 +27,12 @@
  * chosen is ever shown, and only until it is final. It clears itself after
  * a few seconds without typing. -q turns it off.
  *
+ * The keypad backlight (LED class device, default white:kbd_backlight)
+ * comes on at a key press and goes off BACKLIGHT_MS after the last one
+ * (default 5000; -b 0 leaves the LED alone).
+ *
  *   s22-t9d [-v] [-q] [-d DEVICE] [-t TAP_MS] [-l HOLD_MS] [-o OUTDIR]
+ *           [-b BACKLIGHT_MS] [-B LED]
  */
 #include <dirent.h>
 #include <errno.h>
@@ -52,6 +57,8 @@
 static int tap_ms = 900;	/* window for the next tap on the same key */
 static int hold_ms = 500;	/* a press this long types the digit */
 static const char *outdir = "/run/s22-t9";
+static int backlight_ms = 5000;	/* keypad light stays on this long */
+static const char *backlight_led = "white:kbd_backlight";
 
 enum mode { M_LOWER, M_SHIFT1, M_UPPER, M_DIGITS, M_COUNT };
 static const char *mode_name[] = { "abc", "Abc", "ABC", "123" };
@@ -459,6 +466,53 @@ static void key_event(unsigned short code, int value)
 	syn();
 }
 
+/* --------------------------------------------------------- backlight --- */
+static int bl_fd = -1;
+static char bl_max[16] = "1";
+static bool bl_on;
+static long long bl_until;
+
+static void backlight_open(void)
+{
+	char p[256];
+	int fd, n;
+
+	if (!backlight_ms)
+		return;
+	snprintf(p, sizeof(p), "/sys/class/leds/%s/max_brightness", backlight_led);
+	fd = open(p, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		n = read(fd, bl_max, sizeof(bl_max) - 1);
+		bl_max[n > 0 ? n : 0] = 0;
+		bl_max[strcspn(bl_max, "\n")] = 0;
+		close(fd);
+	}
+	snprintf(p, sizeof(p), "/sys/class/leds/%s/brightness", backlight_led);
+	bl_fd = open(p, O_WRONLY | O_CLOEXEC);
+	if (bl_fd < 0)
+		fprintf(stderr, "s22-t9d: %s: %s (no keypad backlight)\n", p, strerror(errno));
+}
+
+static void backlight(bool on)
+{
+	const char *v = on ? bl_max : "0";
+
+	if (bl_fd < 0 || on == bl_on)
+		return;
+	if (pwrite(bl_fd, v, strlen(v), 0) < 0)
+		dbg("backlight: %s\n", strerror(errno));
+	bl_on = on;
+}
+
+/* A key press: light the keypad, or keep it lit */
+static void backlight_poke(void)
+{
+	if (bl_fd < 0)
+		return;
+	backlight(true);
+	bl_until = now_ms() + backlight_ms;
+}
+
 static void timers(void)
 {
 	long long t = now_ms();
@@ -478,6 +532,8 @@ static void timers(void)
 	}
 	if (ind_len && !pend.key && !flash.c && t >= ind_clear_at)
 		indicator_clear();
+	if (bl_on && t >= bl_until)
+		backlight(false);
 }
 
 static int next_timeout(void)
@@ -492,6 +548,8 @@ static int next_timeout(void)
 		next = ind_clear_at;
 	if (flash.c && (next < 0 || flash.until < next))
 		next = flash.until;
+	if (bl_on && (next < 0 || bl_until < next))
+		next = bl_until;
 	if (next < 0)
 		return -1;
 	return next > t ? (int)(next - t) : 0;
@@ -568,7 +626,7 @@ int main(int argc, char **argv)
 	bool quiet = false;
 	int kfd, opt;
 
-	while ((opt = getopt(argc, argv, "vqd:t:l:o:")) != -1) {
+	while ((opt = getopt(argc, argv, "vqd:t:l:o:b:B:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = true; break;
 		case 'q': quiet = true; break;
@@ -576,8 +634,10 @@ int main(int argc, char **argv)
 		case 't': tap_ms = atoi(optarg); break;
 		case 'l': hold_ms = atoi(optarg); break;
 		case 'o': outdir = optarg; break;
+		case 'b': backlight_ms = atoi(optarg); break;
+		case 'B': backlight_led = optarg; break;
 		default:
-			fprintf(stderr, "usage: %s [-v] [-q] [-d DEVICE] [-t TAP_MS] [-l HOLD_MS] [-o OUTDIR]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-v] [-q] [-d DEVICE] [-t TAP_MS] [-l HOLD_MS] [-o OUTDIR] [-b BACKLIGHT_MS] [-B LED]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -601,6 +661,7 @@ int main(int argc, char **argv)
 		vt = open("/dev/tty0", O_WRONLY | O_NOCTTY | O_CLOEXEC);
 	mkdir(outdir, 0755);
 	write_mode();
+	backlight_open();
 	signal(SIGTERM, on_signal);
 	signal(SIGINT, on_signal);
 	fprintf(stderr, "s22-t9d: keypad grabbed; typing as \"S22 Flip keypad (T9)\"\n");
@@ -618,8 +679,11 @@ int main(int argc, char **argv)
 					break;
 				continue;
 			}
-			if (ev.type == EV_KEY)
+			if (ev.type == EV_KEY) {
+				if (ev.value)
+					backlight_poke();
 				key_event(ev.code, ev.value);
+			}
 		}
 		timers();
 		if (dirty) {
@@ -629,6 +693,7 @@ int main(int argc, char **argv)
 	}
 	commit();
 	indicator_clear();
+	backlight(false);
 	ioctl(kfd, EVIOCGRAB, 0);
 	ioctl(ufd, UI_DEV_DESTROY);
 	return 0;

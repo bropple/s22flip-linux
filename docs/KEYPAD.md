@@ -81,7 +81,12 @@ few seconds without typing.
 ```
 T9D_ARGS="-t 900 -l 500"   # -t: ms to tap the same key again, -l: ms to hold for a digit
 T9D_ARGS="-q"              # no indicator
+T9D_ARGS="-b 8000"         # keypad backlight on for 8 s after the last key (default 5 s)
+T9D_ARGS="-b 0"            # leave the keypad backlight alone
 ```
+
+The keypad backlight comes on at the first key press and goes off a few
+seconds after the last one.
 
 `rc-service s22-t9d stop` gives the raw keypad back (digits only, no
 letters); `start` brings T9 back.

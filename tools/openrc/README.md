@@ -14,7 +14,9 @@ what you want with `rc-update add NAME RUNLEVEL`.
 | `rmtfs` | default | Serves the modem's EFS from files in `/var/lib/rmtfs`, seeded once by reading the EFS partitions, and starts the modem | [rmtfs](https://github.com/linux-msm/rmtfs) (`-o` directory mode), [qrtr](https://github.com/linux-msm/qrtr) |
 | `s22-sensord` | default | Sensors through the ADSP (`../s22-sensord.c`) | your own `sns.reg` and group table in `/var/lib/s22-sensord/` |
 | `s22-t9d` | default | Keypad text input (`../s22-t9d.c`, see [KEYPAD.md](../../docs/KEYPAD.md)) | uinput |
-| `s22-lidd` | default | Main display off while the lid is closed (`../s22-lidd.c`); tell elogind to ignore the lid (`HandleLidSwitch=ignore`) | |
+| `s22-lidd` | default | Main display off while the lid is closed (`../s22-lidd.c`), lid hooks in `/etc/s22-lidd.d` (`../s22-lidd.d/`); tell elogind to ignore the lid (`HandleLidSwitch=ignore`) | |
+| `s22-outerd` | default | Outer display status screen while the lid is closed (`../s22-outerd/`) | `s22-outer` |
+| `tqftpserv` | default | TFTP over QRTR for the modem's MCFG files, before `rmtfs` | [tqftpserv](https://github.com/linux-msm/tqftpserv), `modem_pr` next to the modem firmware |
 | `s22-outer` | default | Outer display in a known state (black, backlight off): the built-in panel driver probes before the root filesystem holds its init sequence, so this rebinds it | `cat,s22flip-ext-panel.bin` in `/usr/lib/firmware` |
 
 The C tools build with a plain `gcc -O2 -o NAME NAME.c` on the phone, or

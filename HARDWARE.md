@@ -343,8 +343,9 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
   - rear GC5035 + DW9714 (CAMSS/CCI)
   - flash LED
   - front GC02M2 (needs a driver)
-- **Smaller items:** Venus (enable `venus_mem`, add firmware), keypad
-  backlight check, a UCM profile for the built-in audio.
+- **Smaller items:** Venus (enable `venus_mem`, add firmware),
+  a UCM profile for the built-in audio. (Keypad backlight: done, GPIO LED
+  `white:kbd_backlight`, lit by s22-t9d on key presses.)
 - **Modem with a SIM:** registration, calls, SMS, data. The modem has
   modem-side IMS and carrier profiles, so VoLTE looks possible.
 

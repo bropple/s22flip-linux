@@ -5,21 +5,35 @@
  * both come back. Suspend on lid close is left to later (elogind ignores
  * the lid for now).
  *
- *   s22-lidd [-f FB] [-b BACKLIGHT]   (defaults fb0, backlight)
+ * After a suspend the display driver powers the panel up again, lid or no
+ * lid, so the lid state is re-applied after every resume: detected as a jump
+ * between CLOCK_BOOTTIME (counts suspend) and CLOCK_MONOTONIC (does not),
+ * checked every 2 s, or at once on SIGUSR1.
+ *
+ * Hooks: on every lid change, and once at start, each executable in the
+ * hook directory runs (in name order, not waited for) with "open" or
+ * "closed" as its argument.
+ *
+ *   s22-lidd [-f FB] [-b BACKLIGHT] [-d HOOKDIR]
+ *            (defaults fb0, backlight, /etc/s22-lidd.d)
  */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BIT(arr, b)	((arr)[(b) / 8] & (1 << ((b) % 8)))
 
-static const char *fb = "fb0", *bl = "backlight";
+static const char *fb = "fb0", *bl = "backlight", *hookdir = "/etc/s22-lidd.d";
 
 static void put(const char *path, const char *val)
 {
@@ -39,6 +53,61 @@ static void display(int on)
 	put(p, on ? "0" : "4");		/* FB_BLANK_UNBLANK / POWERDOWN */
 	snprintf(p, sizeof(p), "/sys/class/backlight/%s/bl_power", bl);
 	put(p, on ? "0" : "4");
+}
+
+static void run_hooks(int open)
+{
+	const char *arg = open ? "open" : "closed";
+	struct dirent **list;
+	char p[512];
+	struct stat st;
+	int i, n = scandir(hookdir, &list, NULL, alphasort);
+
+	for (i = 0; i < n; i++) {
+		snprintf(p, sizeof(p), "%s/%s", hookdir, list[i]->d_name);
+		free(list[i]);
+		if (stat(p, &st) || !S_ISREG(st.st_mode) || access(p, X_OK))
+			continue;
+		if (fork() == 0) {
+			execl(p, p, arg, (char *)NULL);
+			fprintf(stderr, "s22-lidd: %s: %s\n", p, strerror(errno));
+			_exit(127);
+		}
+	}
+	if (n >= 0)
+		free(list);
+}
+
+static void lid(int open)
+{
+	display(open);
+	run_hooks(open);
+}
+
+static volatile sig_atomic_t reapply;
+
+static void on_usr1(int sig)
+{
+	(void)sig;
+	reapply = 1;
+}
+
+/* Time spent suspended so far, in ms */
+static long long slept_ms(void)
+{
+	struct timespec b, m;
+
+	clock_gettime(CLOCK_BOOTTIME, &b);
+	clock_gettime(CLOCK_MONOTONIC, &m);
+	return (b.tv_sec - m.tv_sec) * 1000LL + (b.tv_nsec - m.tv_nsec) / 1000000;
+}
+
+static int lid_open(int fd)
+{
+	unsigned char state[SW_MAX / 8 + 1] = { 0 };
+
+	ioctl(fd, EVIOCGSW(sizeof(state)), state);
+	return !BIT(state, SW_LID);
 }
 
 /* The input device that reports SW_LID */
@@ -73,30 +142,53 @@ static int open_lid(void)
 
 int main(int argc, char **argv)
 {
-	unsigned char state[SW_MAX / 8 + 1] = { 0 };
 	struct input_event ev;
-	int fd, opt;
+	struct pollfd pfd;
+	long long slept;
+	int fd, opt, n;
 
-	while ((opt = getopt(argc, argv, "f:b:")) != -1) {
+	while ((opt = getopt(argc, argv, "f:b:d:")) != -1) {
 		switch (opt) {
 		case 'f': fb = optarg; break;
 		case 'b': bl = optarg; break;
+		case 'd': hookdir = optarg; break;
 		default:
-			fprintf(stderr, "usage: %s [-f FB] [-b BACKLIGHT]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-f FB] [-b BACKLIGHT] [-d HOOKDIR]\n",
+				argv[0]);
 			return 2;
 		}
 	}
+	signal(SIGCHLD, SIG_IGN);	/* hooks are not waited for */
+	signal(SIGUSR1, on_usr1);
 	fd = open_lid();
 	if (fd < 0) {
 		perror("s22-lidd: lid switch");
 		return 1;
 	}
 	/* Start from the lid's current position */
-	ioctl(fd, EVIOCGSW(sizeof(state)), state);
-	display(!BIT(state, SW_LID));
-	while (read(fd, &ev, sizeof(ev)) == sizeof(ev))
+	lid(lid_open(fd));
+	slept = slept_ms();
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	for (;;) {
+		n = poll(&pfd, 1, 2000);
+		if (n < 0 && errno != EINTR)
+			break;
+		if (slept_ms() - slept > 500) {	/* resumed from suspend */
+			slept = slept_ms();
+			reapply = 1;
+		}
+		if (reapply) {
+			reapply = 0;
+			lid(lid_open(fd));
+		}
+		if (n <= 0)
+			continue;
+		if (read(fd, &ev, sizeof(ev)) != sizeof(ev))
+			break;
 		if (ev.type == EV_SW && ev.code == SW_LID)
-			display(!ev.value);
-	perror("s22-lidd: read");
+			lid(!ev.value);
+	}
+	perror("s22-lidd");
 	return 1;
 }

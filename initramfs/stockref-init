@@ -40,7 +40,9 @@ for l in /sys/class/leds/*; do
 	cat "$l/max_brightness" > "$l/brightness" 2>/dev/null
 done
 buzz 1
-mount -t devtmpfs devtmpfs /dev
+# The stock kernel has no devtmpfs (Android uses ueventd): fill the ramdisk's
+# static /dev from sysfs instead (wcnss_wlan, urandom, zero, ...)
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
 mkdir -p /dev/pts /tmp /run
 # The Android kernel keeps the pty master inside devpts
 mount -t devpts -o ptmxmode=0666,gid=5,mode=0620 devpts /dev/pts
