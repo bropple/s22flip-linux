@@ -119,6 +119,8 @@ walks through it step by step.
 | `tools/s22-lidd.d/` | Lid hooks: WiFi power save off with the lid open, on with it closed |
 | `tools/s22-outerd/` | Outer display status screen (clock, date, WiFi, Bluetooth, battery, notification ticker, wallpaper); owns the lid-closed keys: side = browse/dismiss notifications, volume = media through a hook |
 | `tools/s22-notify/` | Notifications: `s22-notify` posts them (with a source), `s22-notifyd` vibrates with a per-source pattern |
+| `tools/s22-smsd/` | Incoming text messages over QMI WMS (libqmi from Python): decoded, kept in an inbox file, posted as `sms` notifications, deleted from the modem; never starts mobile data |
+| `tools/openrc/s22-console.map` | Console keymap additions (`/etc/s22-console.map`, see `conf.d/keymaps`): volume and power keys stop typing escape codes into the tty |
 | `tools/s22-partguard` | Make the eMMC partitions a system does not need read-only, with eMMC power-on write protection |
 | `tools/openrc/` | OpenRC services for an installed system: partition guard, zram, clock, USB network, rmtfs, sensors, keypad, lid, outer display ([list](tools/openrc/README.md)) |
 

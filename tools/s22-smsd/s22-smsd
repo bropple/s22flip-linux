@@ -1,0 +1,440 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-smsd: incoming text messages -> inbox and notifications.
+
+Talks QMI WMS to the modem over QRTR (libqmi through GObject introspection);
+ModemManager cannot take this modem (no network port). It never touches
+mobile data (no WDS client).
+
+At start: modem online (DMS) unless -n, MT messages routed to the modem's
+NV storage with store-and-notify, new-message indications on. Every stored
+MT message (new-message indication, or a sweep at start and every 5 min) is
+read raw, decoded (3GPP SMS-DELIVER: GSM 7-bit, UCS-2, concatenated parts),
+appended to INBOX, posted with "s22-notify -s sms", and only then deleted
+from the modem, so its storage never fills. Parts of a long message wait in
+PARTS until all have arrived (or an hour has passed).
+
+INBOX is one line per message: time<TAB>sender<TAB>text, with backslash,
+tab and newline in the text written as \\\\, \\t and \\n.
+
+  s22-smsd [-v] [-n]        run (-v: log every step, -n: leave the modem's
+                            operating mode alone)
+  s22-smsd -d HEXPDU        decode one PDU (SMSC address first) and exit
+"""
+import getopt
+import json
+import os
+import subprocess
+import sys
+import time
+
+INBOX = os.environ.get("S22_SMS_INBOX", "/var/lib/s22-sms/inbox")
+PARTS = os.environ.get("S22_SMS_PARTS", "/var/lib/s22-sms/parts")
+SWEEP_S = 300
+PART_TIMEOUT_S = 3600
+verbose = False
+
+
+def log(*a):
+    print("s22-smsd:", *a, file=sys.stderr, flush=True)
+
+
+def dbg(*a):
+    if verbose:
+        log(*a)
+
+
+# ------------------------------------------------------------ PDU decode ---
+GSM7 = ("@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
+        "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà")
+GSM7_EXT = {0x0A: "\f", 0x14: "^", 0x28: "{", 0x29: "}", 0x2F: "\\", 0x3C: "[",
+            0x3D: "~", 0x3E: "]", 0x40: "|", 0x65: "€"}
+
+
+def septets(data, count):
+    """Unpack COUNT 7-bit values from packed DATA."""
+    out = []
+    for i in range(count):
+        bit = i * 7
+        byte, shift = divmod(bit, 8)
+        v = data[byte] >> shift if byte < len(data) else 0
+        if shift > 1 and byte + 1 < len(data):
+            v |= data[byte + 1] << (8 - shift)
+        out.append(v & 0x7F)
+    return out
+
+
+def gsm7_text(values):
+    s, esc = [], False
+    for v in values:
+        if esc:
+            s.append(GSM7_EXT.get(v, " "))
+            esc = False
+        elif v == 0x1B:
+            esc = True
+        else:
+            s.append(GSM7[v])
+    return "".join(s)
+
+
+def bcd_number(data, digits):
+    s = ""
+    for b in data:
+        for n in (b & 0xF, b >> 4):
+            if n < 10:
+                s += str(n)
+            elif n in (10, 11):
+                s += "*#"[n - 10]
+    return s[:digits]
+
+
+def scts(d):
+    """7-octet service centre time stamp -> ISO 8601"""
+    def sw(b):
+        return (b & 0xF) * 10 + (b >> 4)
+    tz = ((d[6] & 0x7) * 10 + (d[6] >> 4)) * 15
+    sign = "-" if d[6] & 0x8 else "+"
+    return "20%02d-%02d-%02dT%02d:%02d:%02d%s%02d:%02d" % (
+        sw(d[0]), sw(d[1]), sw(d[2]), sw(d[3]), sw(d[4]), sw(d[5]),
+        sign, tz // 60, tz % 60)
+
+
+def decode(pdu):
+    """Decode an SMSC-prefixed 3GPP PDU. Returns a dict, or None if it is
+    not an SMS-DELIVER (status reports and the like)."""
+    p = pdu[0] + 1                      # skip the SMSC address
+    fo = pdu[p]
+    p += 1
+    if fo & 3 != 0:
+        return None
+    oalen, toa = pdu[p], pdu[p + 1]
+    oa = pdu[p + 2:p + 2 + (oalen + 1) // 2]
+    p += 2 + (oalen + 1) // 2
+    if toa & 0x70 == 0x50:              # alphanumeric sender ("T-Mobile")
+        sender = gsm7_text(septets(oa, oalen * 4 // 7))
+    else:
+        sender = ("+" if toa & 0x70 == 0x10 else "") + bcd_number(oa, oalen)
+    dcs = pdu[p + 1]
+    when = scts(pdu[p + 2:p + 9])
+    udl = pdu[p + 9]
+    ud = pdu[p + 10:]
+
+    if dcs >> 6 in (0, 1):
+        alphabet = (dcs >> 2) & 3 if not dcs & 0x20 else -1   # -1: compressed
+    elif dcs >> 4 == 0xF:
+        alphabet = 1 if dcs & 4 else 0
+    elif dcs >> 4 == 0xE:
+        alphabet = 2
+    else:
+        alphabet = 0
+    if alphabet == 3:
+        alphabet = 0
+
+    concat, port, hdr = None, None, 0
+    if fo & 0x40:                       # user data header
+        hdr = ud[0] + 1
+        i = 1
+        while i < hdr:
+            iei, ln = ud[i], ud[i + 1]
+            v = ud[i + 2:i + 2 + ln]
+            if iei == 0x00 and ln == 3:
+                concat = (v[0], v[1], v[2])
+            elif iei == 0x08 and ln == 4:
+                concat = ((v[0] << 8) | v[1], v[2], v[3])
+            elif iei == 0x05 and ln == 4:
+                port = (v[0] << 8) | v[1]
+            elif iei == 0x04 and ln == 2:
+                port = v[0]
+            i += 2 + ln
+
+    if alphabet == 0:
+        skip = (hdr * 8 + 6) // 7
+        text = gsm7_text(septets(ud, udl)[skip:])
+    elif alphabet == 2:
+        text = bytes(ud[hdr:udl]).decode("utf-16-be", "replace")
+    else:
+        text = None
+    if port == 2948:
+        text = "[picture or group message (MMS); not supported yet]"
+    elif text is None:
+        text = "[binary message, %d bytes]" % (udl - hdr)
+    return {"sender": sender, "time": when, "text": text, "concat": concat}
+
+
+# --------------------------------------------------------------- delivery ---
+def escape(s):
+    return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+
+
+def deliver(msg):
+    """Archive and notify; raises OSError if the inbox can't be written."""
+    line = "%s\t%s\t%s\n" % (msg["time"], escape(msg["sender"]),
+                               escape(msg["text"]))
+    fd = os.open(INBOX, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+    try:
+        os.write(fd, line.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.chown(INBOX, 0, wheel_gid())
+    except OSError:
+        pass
+    r = subprocess.run(["s22-notify", "-s", "sms",
+                        "%s: %s" % (msg["sender"], msg["text"])])
+    if r.returncode:
+        log("s22-notify failed (%d)" % r.returncode)
+    dbg("from %s archived" % msg["sender"])
+
+
+def wheel_gid():
+    import grp
+    return grp.getgrnam("wheel").gr_gid
+
+
+def part_key(msg):
+    ref, total, _ = msg["concat"]
+    safe = "".join(c if c.isalnum() else "_" for c in msg["sender"])
+    return "%s_%d_%d" % (safe, ref, total)
+
+
+def store_part(msg):
+    """Keep one part of a long message; deliver the whole once complete."""
+    key = part_key(msg)
+    seq = msg["concat"][2]
+    path = os.path.join(PARTS, "%s_%d.json" % (key, seq))
+    with open(path + ".tmp", "w") as f:
+        json.dump(msg, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(path + ".tmp", path)
+    assemble(key, msg["concat"][1], force=False)
+
+
+def assemble(key, total, force):
+    parts = {}
+    for name in os.listdir(PARTS):
+        if name.startswith(key + "_") and name.endswith(".json"):
+            with open(os.path.join(PARTS, name)) as f:
+                m = json.load(f)
+            parts[m["concat"][2]] = (name, m)
+    if not parts or (len(parts) < total and not force):
+        return
+    first = parts[min(parts)][1]
+    text = "".join(parts[i][1]["text"] if i in parts else "[…]"
+                   for i in range(1, total + 1))
+    deliver({"sender": first["sender"], "time": first["time"], "text": text})
+    for name, _ in parts.values():
+        os.unlink(os.path.join(PARTS, name))   # our own, now in the inbox
+
+
+def flush_stale_parts():
+    """Deliver long messages whose missing parts never came."""
+    now = time.time()
+    keys = {}
+    for name in os.listdir(PARTS):
+        if not name.endswith(".json"):
+            continue
+        if now - os.stat(os.path.join(PARTS, name)).st_mtime > PART_TIMEOUT_S:
+            key, total = name.rsplit("_", 1)[0], int(name.rsplit("_", 2)[1])
+            keys[key] = total
+    for key, total in keys.items():
+        log("long message %s incomplete after an hour; delivering it" % key)
+        assemble(key, total, force=True)
+
+
+# -------------------------------------------------------------------- QMI ---
+def main_loop(set_online):
+    import gi
+    gi.require_version("Qmi", "1.0")
+    gi.require_version("Qrtr", "1.0")
+    from gi.repository import GLib, Qmi, Qrtr
+
+    ctx = GLib.MainContext.default()
+
+    def wait(start, finish):
+        box = []
+        start(lambda _src, res, *_: box.append(res))
+        while not box:
+            ctx.iteration(True)
+        return finish(box[0])
+
+    def req(client, name, inp, timeout=10):
+        out = wait(lambda cb: getattr(client, name)(inp, timeout, None, cb),
+                   getattr(client, name + "_finish"))
+        out.get_result()                # raises GLib.Error on a QMI error
+        return out
+
+    bus = wait(lambda cb: Qrtr.Bus.new(1000, None, cb), Qrtr.Bus.new_finish)
+    while True:                         # the modem may still be booting
+        try:
+            node = wait(lambda cb: bus.wait_for_node(0, 30000, None, cb),
+                        bus.wait_for_node_finish)
+            break
+        except GLib.Error:
+            dbg("waiting for the modem")
+    dev = wait(lambda cb: Qmi.Device.new_from_node(node, None, cb),
+               Qmi.Device.new_from_node_finish)
+    wait(lambda cb: dev.open(Qmi.DeviceOpenFlags(0), 15, None, cb),
+         dev.open_finish)
+
+    def client(service):
+        return wait(lambda cb: dev.allocate_client(service, 0, 10, None, cb),
+                    dev.allocate_client_finish)
+
+    if set_online:
+        dms = client(Qmi.Service.DMS)
+        mode = req(dms, "get_operating_mode", None).get_mode()
+        if mode != Qmi.DmsOperatingMode.ONLINE:
+            inp = Qmi.MessageDmsSetOperatingModeInput()
+            inp.set_mode(Qmi.DmsOperatingMode.ONLINE)
+            req(dms, "set_operating_mode", inp)
+            log("modem was %s; set online" % mode.value_nick)
+
+    wms = client(Qmi.Service.WMS)
+    MODE = Qmi.WmsMessageMode.GSM_WCDMA
+    NV = Qmi.WmsStorageType.NV
+
+    routes = []
+    for cls in range(5):                # class 0-3 and none: NV, store+notify
+        e = Qmi.MessageWmsSetRoutesInputRouteListElement()
+        e.message_type = Qmi.WmsMessageType(0)     # point-to-point
+        e.message_class = Qmi.WmsMessageClass(cls)
+        e.storage = NV
+        e.receipt_action = Qmi.WmsReceiptAction.STORE_AND_NOTIFY
+        routes.append(e)
+    inp = Qmi.MessageWmsSetRoutesInput()
+    inp.set_route_list(routes)
+    try:
+        req(wms, "set_routes", inp)
+    except GLib.Error as e:
+        log("set routes: %s (keeping the modem's routes)" % e.message)
+    inp = Qmi.MessageWmsSetEventReportInput()
+    inp.set_new_mt_message_indicator(True)
+    req(wms, "set_event_report", inp)
+
+    def handle(storage, index):
+        inp = Qmi.MessageWmsRawReadInput()
+        inp.set_message_memory_storage_id(storage, index)
+        inp.set_message_mode(MODE)
+        tag, fmt, data = req(wms, "raw_read", inp).get_raw_message_data()
+        data = bytes(data)
+        dbg("message %s/%d: tag %s format %s, %d bytes"
+            % (storage.value_nick, index, tag.value_nick, fmt.value_nick, len(data)))
+        if fmt != Qmi.WmsMessageFormat.GSM_WCDMA_POINT_TO_POINT:
+            log("message %d: format %s, not a text; deleting" % (index, fmt.value_nick))
+            msg = None
+        else:
+            try:
+                msg = decode(data)
+            except (IndexError, ValueError) as e:
+                log("message %d: cannot decode (%s): %s" % (index, e, data.hex()))
+                msg = {"sender": "?", "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                       "text": "[undecodable message]", "concat": None}
+        if msg is None:
+            pass
+        elif msg["concat"] and msg["concat"][1] > 1:
+            store_part(msg)
+        else:
+            deliver(msg)
+        inp = Qmi.MessageWmsDeleteInput()
+        inp.set_memory_storage(storage)
+        inp.set_memory_index(index)
+        inp.set_message_mode(MODE)
+        req(wms, "delete", inp)
+
+    def sweep():
+        for storage in (NV, Qmi.WmsStorageType.UIM):
+            for tag in (Qmi.WmsMessageTagType.MT_NOT_READ,
+                        Qmi.WmsMessageTagType.MT_READ):
+                inp = Qmi.MessageWmsListMessagesInput()
+                inp.set_storage_type(storage)
+                inp.set_message_tag(tag)
+                inp.set_message_mode(MODE)
+                try:
+                    lst = req(wms, "list_messages", inp).get_message_list()
+                except GLib.Error as e:
+                    dbg("list %s/%s: %s" % (storage.value_nick, tag.value_nick, e.message))
+                    continue
+                for m in lst:
+                    handle(storage, m.memory_index)
+        flush_stale_parts()
+
+    pending, busy = [], [False]
+    failures = [0]
+
+    def work():
+        if busy[0]:
+            return False
+        busy[0] = True
+        try:
+            while pending:
+                job = pending.pop(0)
+                job()
+            failures[0] = 0
+        except (GLib.Error, OSError) as e:
+            log("error: %s" % e)
+            failures[0] += 1
+            if failures[0] >= 5:
+                log("too many errors; exiting")
+                loop.quit()
+        finally:
+            busy[0] = False
+        return False
+
+    def queue(job):
+        pending.append(job)
+        GLib.idle_add(work)
+
+    def on_event(_client, out):
+        try:
+            storage, index = out.get_mt_message()
+        except GLib.Error:
+            dbg("event report without a stored message")
+            return
+        dbg("new message %s/%d" % (storage.value_nick, index))
+        queue(lambda: handle(storage, index))
+
+    def on_removed(*_):
+        log("modem went away; exiting")
+        loop.quit()
+
+    wms.connect("event-report", on_event)
+    dev.connect("device-removed", on_removed)
+    GLib.timeout_add_seconds(SWEEP_S, lambda: queue(sweep) or True)
+    queue(sweep)
+    log("ready")
+    loop = GLib.MainLoop()
+    loop.run()
+    return 1
+
+
+def main():
+    global verbose
+    set_online = True
+    try:
+        opts, _ = getopt.getopt(sys.argv[1:], "vnd:")
+    except getopt.GetoptError:
+        print(__doc__.split("\n\n")[-1], file=sys.stderr)
+        return 2
+    for o, a in opts:
+        if o == "-v":
+            verbose = True
+        elif o == "-n":
+            set_online = False
+        elif o == "-d":
+            msg = decode(bytes.fromhex(a))
+            print(json.dumps(msg, ensure_ascii=False, indent=1))
+            return 0
+    for d, mode in ((os.path.dirname(INBOX), 0o750), (PARTS, 0o750)):
+        os.makedirs(d, exist_ok=True)
+        os.chmod(d, mode)
+        try:
+            os.chown(d, 0, wheel_gid())
+        except (OSError, KeyError):
+            pass
+    return main_loop(set_online)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

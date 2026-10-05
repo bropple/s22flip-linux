@@ -37,7 +37,7 @@ Firmware: `LTE_S02113.11_N_S22Flip_0.030.03` (V30), Android 11 (Go), kernel 4.9.
 | USB-C audio switch | FSA4480 in DT, **not bound** (probably not populated) | i2c-5 addr 0x42 | Mainline (`fsa4480`). |
 | USB | ChipIdea HS OTG (`78db000.usb`, `msm_otg`) | | Mainline (`ci_hdrc_msm`). |
 | WiFi/BT/FM | WCNSS: Pronto core (`a21b000`) + iris RF chip (probably **WCN3615/3620**, as on other QM215 boards). BT over SMD, FM via `iris-fm`. | | Mainline (`wcn36xx`, `qcom_wcnss_iris`, `btqcomsmd`). Needs the device's signed `wcnss.mdt` and NV. |
-| Modem | Q6v5 MSS (`4080000.qcom,mss`), BAM-DMUX data, MPSS `SDM439_GENNS_PACK` 3-00078. LTE/GSM/CDMA/IMS features. | | Mainline (`qcom_q6v5_mss`, `bam-dmux`, qrtr). ModemManager works on msm8916-family boards. VoLTE calls are hard; data and SMS are feasible. |
+| Modem | Q6v5 MSS (`4080000.qcom,mss`), BAM-DMUX data, MPSS `SDM439_GENNS_PACK` 3-00078. LTE/GSM/CDMA/IMS features. | | Mainline (`qcom_q6v5_mss`, `bam-dmux`, qrtr). ModemManager works on msm8916-family boards, but not on this one (no network port, see "Modem with a SIM"). SMS works over QMI WMS. VoLTE calls are hard; data is feasible. |
 | GNSS | Via modem (`android.hardware.location.gps`) | | Feasible through the modem's QMI loc service. |
 | NFC | `nqx` HAL configured and a `pinctrl/nfc` node exists, but **no NFC feature is reported and no NFC i2c device is bound**, so it is likely absent. | | n/a |
 | Rear camera | **GalaxyCore GC5035** 5 MP + **DW9714** VCM + `gc5035_otp` EEPROM | CCI `camera@0`, `actuator@0`, CSIPHY | `gc5035` is in the msm89x7 tree (used by Nokia 2780). `dw9714` is mainline. CAMSS 8x17 is enabled in that tree. |
@@ -146,7 +146,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | USB host (OTG) | **Probably data-capable, but no VBUS.** Stock sets the controller to OTG (`qcom,hsusb-otg-mode = 3`) and the WUSB3801 to dual-role (`drp-toggle-time`, `host-current`), but the USB node has no VBUS supply and the PM8916 linear charger has no OTG boost; no external 5 V boost regulator exists in the stock DT. Devices (even self-powered hubs) normally wait for host VBUS before connecting, so host mode would need an adapter that injects external 5 V, outside the Type-C spec. Untested. Bluetooth is the simpler route for a keyboard |
 | Headset (USB-C analog) | **No 3.5 mm jack: audio over USB-C.** Stock has an **FSA4480** analog switch (`qcom,fsa4480-i2c`, I²C `0x7af5000` @ 0x42, the WUSB3801's bus), `qcom,msm-mbhc-usbc-audio-supported`, and two "USB-C analog enable" GPIOs (`msm_cdc_pinctrl_cdc_usbc_audio_en1`/`en2`). Mainline has `fsa4480` (Type-C mode switch, not enabled yet) and `wusb3801` already reports `TYPEC_ACCESSORY_AUDIO`. Needs: the FSA4480 node linked to the Type-C port, the enable GPIOs, PM8916 MBHC detection and buttons, a mixer path. Only **passive** adapters/earbuds can work (digital USB-C audio needs host VBUS). Untested |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
-| Modem | **Works without a SIM** (see "Modem" below): boots, QMI over QRTR, IMEI and firmware revision match stock, goes online, measures LTE cells. Registration, calls and data need a SIM |
+| Modem | **Registers on LTE and receives SMS** (see "Modem" and "Modem with a SIM" below): boots, QMI over QRTR, IMEI and firmware revision match stock, picks the carrier's MCFG profile itself. Calls and data not yet; bam-dmux never comes up |
 | Sensors (ADSP) | **Accelerometer, proximity, light and pressure all work** through the ADSP with our own daemon `s22-sensord` (see "Sensors through the ADSP"). The sensor bus is locked to the ADSP |
 | Audio | **Earpiece, both built-in mics and the loudspeaker work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`, PM8916 codec, AW88194A amp on Quinary MI2S with our own driver, speaker protection DSP running. Headset jack untested |
 | Venus | Needs `venus.mbn`, which isn't in the ramdisk |
@@ -200,6 +200,35 @@ Results:
 Notes:
 - Android's rmtfs kept syncing `modemst1` after the backup was taken. That copy differs, and the newer one is saved as `backup/partitions/modemst1.after-android-2026-10-03.img`.
 - The host's ModemManager probes the gadget's ACM serial port and garbles that shell. Use telnet (`tools/s22sh` now does).
+
+## Modem with a SIM (2026-10-05)
+
+A prepaid SIM from a T-Mobile MVNO, in the installed system (rmtfs serving the
+EFS from files, tqftpserv for the MCFG indexes):
+- **Registration:** LTE, CS and PS attached, not roaming, about 20 s after
+  boot. The modem selected the `Commercial-TMO` MCFG software profile by
+  itself (`--pdc-list-configs=software`), with the carrier's APNs as profiles
+  1-3 (internet, `ims`, `sos`). Voice domain preference is `ps-preferred`.
+- **Operating mode:** still reports `shutting-down` after boot, so something
+  has to set it online.
+- **SMS works, through QMI WMS:** routes for every message class set to NV
+  storage with store-and-notify (the modem acks to the network), new-message
+  indications on, then raw read, decode the 3GPP PDU (SMSC address first),
+  and delete. The carrier's multi-part welcome text and a text from another
+  phone both arrived. qmicli's WMS support stops at routes, so this needs a
+  libqmi client of its own (`tools/s22-smsd`, Python through GObject
+  introspection).
+- **ModemManager does not work here:** it refuses the modem with "Failed to
+  find a net port in the QMI modem". Its QMI modems need a network port, and
+  the `bam-dmux` netdevs only appear once the modem raises its SMSM
+  power-collapse bit, which this firmware never does, online or not, with or
+  without a SIM. The AT port (`wwan0at0`) answers `AT+CPIN?`/`AT+CFUN?` but
+  has no SMS commands.
+- **Data:** WDS reports `disconnected` (nothing on the Linux side can use the
+  LTE default bearer without bam-dmux), and the firmware refuses the
+  autoconnect query (`InvalidOperation`).
+- **Phone number:** `qmicli --dms-get-msisdn` reads the number the network
+  wrote to the SIM.
 
 ## Main display (working, 2026-10-03)
 
@@ -346,8 +375,9 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
 - **Smaller items:** Venus (enable `venus_mem`, add firmware),
   a UCM profile for the built-in audio. (Keypad backlight: done, GPIO LED
   `white:kbd_backlight`, lit by s22-t9d on key presses.)
-- **Modem with a SIM:** registration, calls, SMS, data. The modem has
-  modem-side IMS and carrier profiles, so VoLTE looks possible.
+- **Modem with a SIM:** registration and SMS work. Calls, data and the
+  modem's sleep are next; data needs bam-dmux. The modem has modem-side IMS
+  and carrier profiles, so VoLTE looks possible.
 
 ## Contents of `dump/`
 
