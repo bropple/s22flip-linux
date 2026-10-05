@@ -21,7 +21,7 @@ start() {
 		echo 0xD001 > "$G/idProduct"
 		echo "Cat" > "$G/strings/0x409/manufacturer"
 		echo "S22 Flip (Linux)" > "$G/strings/0x409/product"
-		echo "benctix-cat" > "$G/strings/0x409/serialnumber"
+		echo "s22flip-linux" > "$G/strings/0x409/serialnumber"
 		echo "NCM" > "$G/configs/c.1/strings/0x409/configuration"
 		# Fixed, locally administered addresses so the host keeps its profile
 		echo "${USBNET_DEV_MAC:-02:22:f1:1b:00:01}" > "$G/functions/ncm.usb0/dev_addr"
