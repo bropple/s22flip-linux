@@ -117,7 +117,8 @@ walks through it step by step.
 | `tools/s22-t9d.c` | Keypad text input: multi-tap letters, modes, Ctrl, a console indicator, the keypad backlight ([reference](docs/KEYPAD.md)) |
 | `tools/s22-lidd.c` | Main display off while the lid is closed; runs hooks on lid changes and after resume |
 | `tools/s22-lidd.d/` | Lid hooks: WiFi power save off with the lid open, on with it closed |
-| `tools/s22-outerd/` | Outer display status screen (clock, date, WiFi, Bluetooth, battery, notification ticker, wallpaper) and `s22-notify` |
+| `tools/s22-outerd/` | Outer display status screen (clock, date, WiFi, Bluetooth, battery, notification ticker, wallpaper); owns the lid-closed keys: side = browse/dismiss notifications, volume = media through a hook |
+| `tools/s22-notify/` | Notifications: `s22-notify` posts them (with a source), `s22-notifyd` vibrates with a per-source pattern |
 | `tools/s22-partguard` | Make the eMMC partitions a system does not need read-only, with eMMC power-on write protection |
 | `tools/openrc/` | OpenRC services for an installed system: partition guard, zram, clock, USB network, rmtfs, sensors, keypad, lid, outer display ([list](tools/openrc/README.md)) |
 

@@ -1,0 +1,27 @@
+#!/bin/sh
+# s22-outerd media hook: the volume keys.
+#   volume-up | volume-down   short press: default sink volume, 5% steps (max 100%)
+#   next | previous           long press: track, through MPRIS (playerctl)
+# Runs as root; acts in the PipeWire session of the user who has one. Prints
+# the new volume ("Volume: 0.55") for s22-outerd to show. A music player can
+# replace this file to handle the keys itself.
+action=${1:-}
+
+for sock in /run/user/*/pipewire-0; do
+	[ -S "$sock" ] || continue
+	uid=${sock#/run/user/}; uid=${uid%%/*}
+	gid=$(id -g "$uid") || continue
+	as_user() {	# stderr dropped: wpctl warns about RTKit on every call
+		setpriv --reuid="$uid" --regid="$gid" --init-groups \
+			env XDG_RUNTIME_DIR=/run/user/$uid \
+			DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus "$@" 2>/dev/null
+	}
+	case "$action" in
+	volume-up)	as_user wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
+			as_user wpctl get-volume @DEFAULT_AUDIO_SINK@ ;;	# shown by s22-outerd
+	volume-down)	as_user wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+			as_user wpctl get-volume @DEFAULT_AUDIO_SINK@ ;;
+	next|previous)	command -v playerctl >/dev/null && as_user playerctl "$action" ;;
+	esac
+	exit 0
+done

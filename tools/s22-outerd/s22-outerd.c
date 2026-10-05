@@ -3,10 +3,18 @@
  * s22-outerd: a status screen on the Cat S22 Flip's outer 128x128 display.
  *
  * With the lid closed, the screen lights for SHOW_MS (default 10 s) when the
- * lid closes, when a side, volume or power key is pressed, and when a
+ * lid closes, when the side or a volume key is pressed, and when a
  * notification arrives. It shows the time and date, battery, WiFi and
- * Bluetooth, and the newest notification, over a wallpaper. Opening the lid
- * turns it off (backlight off, panel blanked).
+ * Bluetooth, and a notification, over a wallpaper. Opening the lid turns it
+ * off (backlight off, panel blanked).
+ *
+ * The keys reachable with the lid closed belong to this daemon:
+ *   side, short   wake; when lit, the next (older) notification
+ *   side, long    dismiss the notification shown
+ *   volume, short media volume up/down     (also with the lid open)
+ *   volume, long  next/previous track       (also with the lid open)
+ * Media actions run HOOKDIR/media volume-up|volume-down|next|previous
+ * (default /etc/s22-outerd.d/media), so a music player can take them over.
  *
  * Wallpaper: a binary PPM (P6) of any size, scaled to cover the screen, at
  * WALLPAPER (default /var/lib/s22-outer/wallpaper.ppm). It is re-read when
@@ -22,10 +30,11 @@
  * Notifications: one file per notification in NOTIFYDIR (default
  * /run/s22-notify, world-writable and sticky); the newest is shown on one
  * line, as a ticker that scrolls when it does not fit. s22-notify writes and
- * clears them.
+ * clears them ("source=" and "text=" lines; a file without "text=" is shown
+ * as it is).
  *
  *   s22-outerd [-v] [-f FBNAME] [-B BACKLIGHT] [-t SHOW_MS] [-w WALLPAPER]
- *              [-n NOTIFYDIR] [-s SETTINGS]
+ *              [-n NOTIFYDIR] [-s SETTINGS] [-k HOOKDIR]
  */
 #include <dirent.h>
 #include <errno.h>
@@ -65,6 +74,7 @@ static int show_ms = 10000;
 static const char *wallpaper = "/var/lib/s22-outer/wallpaper.ppm";
 static const char *notifydir = "/run/s22-notify";
 static const char *settings = "/var/lib/s22-outer/settings";
+static const char *hookdir = "/etc/s22-outerd.d";
 static bool verbose;
 
 /* From the settings file */
@@ -141,6 +151,8 @@ static int find_fb(void)
 static bool lit;
 static long long lit_since;	/* when the screen last lit: ticker start */
 static bool ticking;		/* a ticker is scrolling: redraw often */
+static int volume_pct = -1;	/* last volume the media hook reported */
+static long long volume_until;	/* show it until then */
 
 static void flush(void)
 {
@@ -370,6 +382,44 @@ static int text8(int x, int y, const char *s, uint16_t c)
 	return x;
 }
 
+/*
+ * WiFi: a dot and three arcs, 15x12 px. The digit is the segment, 0 (dot) to
+ * 3 (outer arc); the first "lit" segments are white, the rest grey.
+ */
+static const char *wifi_px[] = {
+	"......333......",
+	"...333333333...",
+	".333.......333.",
+	"33...........33",
+	"3...2222222...3",
+	"..222.....222..",
+	"..2.........2..",
+	".....11111.....",
+	"....11...11....",
+	"...............",
+	".......0.......",
+	"......000......",
+};
+
+static void wifi_icon(int x0, int y0, int lit)
+{
+	int x, y;
+
+	for (y = 0; y < 12; y++)
+		for (x = 0; x < 15; x++)
+			if (wifi_px[y][x] != '.')
+				pixel(x0 + x, y0 + y, wifi_px[y][x] - '0' < lit ? WHITE : GREY);
+}
+
+/* Signal bars (0-4), kept for the cellular signal */
+static void __attribute__((unused)) signal_bars(int x0, int bars)
+{
+	int i;
+
+	for (i = 0; i < 4; i++)
+		rect(x0 + i * 4, 14 - 3 * (i + 1), 3, 3 * (i + 1), i < bars ? WHITE : GREY);
+}
+
 static const char *bt_rune[] = {
 	"...#...", "...##..", "#..#.#.", ".#.#..#", "..##.#.", "...##..",
 	"..##.#.", ".#.#..#", "#..#.#.", "...##..", "...#...",
@@ -408,28 +458,48 @@ static int battery(bool *charging)
 	return cap;
 }
 
-/* WiFi bars 0-4, or -1 when not associated */
+/*
+ * WiFi bars 0-4, -1 when not associated, -2 without a WiFi interface. The
+ * signal comes from nl80211 through "iw dev IF link" (there is no
+ * /proc/net/wireless without wireless extensions), at most every 5 s.
+ */
 static int wifi_bars(void)
 {
-	char line[256];
-	FILE *f = fopen("/proc/net/wireless", "re");
-	int bars = -1;
+	static long long checked;
+	static int bars = -2;
+	char line[256], cmd[128], ifname[64] = "";
+	struct dirent *de;
+	DIR *d;
+	FILE *f;
 
-	if (!f)
-		return -1;
-	while (fgets(line, sizeof(line), f)) {
-		char ifname[32];
-		float link, level;
-
-		if (sscanf(line, " %31[^:]: %*x %f %f", ifname, &link, &level) != 3 ||
-		    strncmp(ifname, "wlan", 4))
-			continue;
-		if (level >= 0)
-			continue;	/* no dBm: not associated */
-		bars = level >= -55 ? 4 : level >= -65 ? 3 : level >= -75 ? 2 :
-		       level >= -85 ? 1 : 0;
+	if (checked && now_ms() - checked < 5000)
+		return bars;
+	checked = now_ms();
+	d = opendir("/sys/class/net");
+	if (d) {
+		while ((de = readdir(d)))
+			if (!strncmp(de->d_name, "wlan", 4)) {
+				snprintf(ifname, sizeof(ifname), "%.32s", de->d_name);
+				break;
+			}
+		closedir(d);
 	}
-	fclose(f);
+	bars = -2;
+	if (!ifname[0])
+		return bars;
+	bars = -1;
+	snprintf(cmd, sizeof(cmd), "iw dev %s link 2>/dev/null", ifname);
+	f = popen(cmd, "re");
+	if (!f)
+		return bars;
+	while (fgets(line, sizeof(line), f)) {
+		int level;
+
+		if (sscanf(line, " signal: %d dBm", &level) == 1)
+			bars = level >= -55 ? 4 : level >= -65 ? 3 : level >= -75 ? 2 :
+			       level >= -85 ? 1 : 0;
+	}
+	pclose(f);
 	return bars;
 }
 
@@ -449,45 +519,101 @@ static bool bt_connected(void)
 	return on;
 }
 
-/* Newest notification: its text and how many there are */
-static int notification(char *text, size_t len)
+/* Notifications, newest first; cursor = the one shown (0 = newest) */
+#define MAX_NOTES 64
+struct note { char name[256]; time_t mtime; };
+static int cursor;
+static bool shown_wrap;		/* the side key stepped past the oldest: wrap */
+static char shown[256];		/* the file of the notification on screen */
+
+static int by_age(const void *a, const void *b)
+{
+	const struct note *x = a, *y = b;
+
+	if (x->mtime != y->mtime)
+		return x->mtime < y->mtime ? 1 : -1;
+	return strcmp(y->name, x->name);
+}
+
+static int list_notes(struct note *list)
 {
 	char p[512];
 	struct dirent *de;
 	struct stat st;
-	time_t newest = 0;
 	DIR *d = opendir(notifydir);
 	int n = 0;
 
-	text[0] = 0;
 	if (!d)
 		return 0;
-	while ((de = readdir(d))) {
+	while ((de = readdir(d)) && n < MAX_NOTES) {
 		if (de->d_name[0] == '.')
 			continue;
 		snprintf(p, sizeof(p), "%s/%s", notifydir, de->d_name);
 		if (stat(p, &st) || !S_ISREG(st.st_mode))
 			continue;
-		n++;
-		if (st.st_mtime >= newest) {
-			FILE *f = fopen(p, "re");
-			size_t r = 0;
-
-			newest = st.st_mtime;
-			if (f) {
-				r = fread(text, 1, len - 1, f);
-				fclose(f);
-			}
-			text[r] = 0;
-		}
+		snprintf(list[n].name, sizeof(list[n].name), "%s", de->d_name);
+		list[n++].mtime = st.st_mtime;
 	}
 	closedir(d);
+	qsort(list, n, sizeof(*list), by_age);
+	return n;
+}
+
+/* The notification at the cursor: its text (one line); returns how many */
+static int notification(char *text, size_t len)
+{
+	struct note list[MAX_NOTES];
+	char p[512];
+	FILE *f;
+	size_t r = 0;
+	int n = list_notes(list);
+
+	text[0] = 0;
+	shown[0] = 0;
+	if (!n) {
+		cursor = 0;
+		return 0;
+	}
+	if (cursor >= n)
+		cursor = shown_wrap ? 0 : n - 1;
+	shown_wrap = false;
+	memcpy(shown, list[cursor].name, sizeof(shown));	/* same size */
+	snprintf(p, sizeof(p), "%s/%s", notifydir, shown);
+	f = fopen(p, "re");
+	if (f) {
+		r = fread(text, 1, len - 1, f);
+		fclose(f);
+	}
+	text[r] = 0;
+	/* s22-notify's format: "key=value" lines, the text in "text=" */
+	{
+		char *t = !strncmp(text, "text=", 5) ? text : strstr(text, "\ntext=");
+
+		if (t) {
+			t += *t == '\n' ? 6 : 5;
+			memmove(text, t, strlen(t) + 1);
+			text[strcspn(text, "\n")] = 0;
+		}
+	}
 	for (char *c = text; *c; c++)	/* one line of plain characters */
 		if ((unsigned char)*c < ' ')
 			*c = ' ';
 	for (size_t l = strlen(text); l && text[l - 1] == ' '; l--)
 		text[l - 1] = 0;
 	return n;
+}
+
+static void dismiss_shown(void)
+{
+	char p[512];
+
+	if (!shown[0])
+		return;
+	snprintf(p, sizeof(p), "%s/%s", notifydir, shown);
+	if (unlink(p))
+		fprintf(stderr, "s22-outerd: dismiss %s: %s\n", shown, strerror(errno));
+	dbg("dismissed %s\n", shown);
+	shown[0] = 0;		/* the cursor now points at the next one */
 }
 
 /* ------------------------------------------------------------ screen --- */
@@ -504,11 +630,9 @@ static void draw(void)
 
 	/* Status bar */
 	dim(0, 0, W, 18);
-	bars = wifi_bars();
-	if (bars >= 0)
-		for (i = 0; i < 4; i++)
-			rect(2 + i * 4, 14 - 3 * (i + 1), 3, 3 * (i + 1),
-			     i < bars ? WHITE : GREY);
+	bars = wifi_bars();	/* all grey when not connected */
+	if (bars >= -1)
+		wifi_icon(2, 3, bars > 0 ? bars : 0);	/* bars 1-4: dot + arcs */
 	if (bt_connected())
 		for (i = 0; i < 11; i++)
 			for (x = 0; x < 7; x++)
@@ -550,16 +674,31 @@ static void draw(void)
 	strftime(buf, sizeof(buf), "%a %d %b %Y", &tm);
 	text8((W - (int)strlen(buf) * 8) / 2, 66, buf, WHITE);
 
-	/* Notification: the newest on one line, scrolling (ticker) when it
-	 * does not fit; "+N" at the right when there are others */
-	n = notification(note, sizeof(note));
+	/* A volume change: a bar in the notification strip for 2 s */
 	ticking = false;
+	if (volume_pct >= 0 && now_ms() < volume_until) {
+		int bw = 72 * (volume_pct > 100 ? 100 : volume_pct) / 100;
+
+		dim(0, 96, W, 20);
+		text8(2, 98, "Vol", WHITE);
+		rect(30, 101, 74, 10, GREY);
+		rect(31, 102, 72, 8, BLACK);
+		rect(31, 102, bw, 8, WHITE);
+		snprintf(buf, sizeof(buf), "%d", volume_pct);
+		text8(W - 2 - (int)strlen(buf) * 8, 98, buf, WHITE);
+		flush();
+		return;
+	}
+
+	/* Notification at the cursor on one line, scrolling (ticker) when it
+	 * does not fit; "2/3" at the right when there are several */
+	n = notification(note, sizeof(note));
 	if (n) {
 		int right = W, tw = (int)strlen(note) * 8;
 
 		dim(0, 96, W, 20);
 		if (n > 1) {
-			snprintf(buf, sizeof(buf), "+%d", n - 1);
+			snprintf(buf, sizeof(buf), "%d/%d", cursor + 1, n);
 			right = W - (int)strlen(buf) * 8 - 2;
 			text8(right + 1, 98, buf, YELLOW);
 		}
@@ -586,11 +725,45 @@ static struct { int fd; char path[300]; } inputs[MAX_INPUTS];
 static int ninputs;
 static bool lid_closed;
 
+/* The keys reachable with the lid closed (power/End is on the keypad) */
 static bool wake_key(int code)
 {
-	return code == KEY_VOLUMEUP || code == KEY_VOLUMEDOWN ||
-	       code == KEY_POWER || code == KEY_NUMERIC_B;
+	return code == KEY_VOLUMEUP || code == KEY_VOLUMEDOWN || code == KEY_NUMERIC_B;
 }
+
+/*
+ * Run HOOKDIR/media ACTION. A hook that prints "Volume: 0.55" (wpctl
+ * get-volume's format) gets that shown on the outer display.
+ */
+
+static void media(const char *action)
+{
+	char p[300], cmd[400], line[128];
+	FILE *f;
+
+	snprintf(p, sizeof(p), "%s/media", hookdir);
+	dbg("media %s\n", action);
+	if (access(p, X_OK))
+		return;
+	snprintf(cmd, sizeof(cmd), "'%s' %s", p, action);
+	f = popen(cmd, "re");
+	if (!f)
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		float v;
+
+		if (sscanf(line, "Volume: %f", &v) == 1) {
+			volume_pct = (int)(v * 100 + 0.5);
+			volume_until = now_ms() + 2000;
+		}
+	}
+	pclose(f);
+}
+
+#define LONG_MS 600
+static int held;		/* key being held, 0 for none */
+static long long held_at;
+static bool held_long;		/* its long action already ran */
 
 static void scan_inputs(void)
 {
@@ -659,7 +832,7 @@ int main(int argc, char **argv)
 	long long show_until = 0;
 	int opt, i, in_notify, in_dev;
 
-	while ((opt = getopt(argc, argv, "vf:B:t:w:n:s:")) != -1) {
+	while ((opt = getopt(argc, argv, "vf:B:t:w:n:s:k:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = true; break;
 		case 'f': fb_name = optarg; break;
@@ -668,9 +841,10 @@ int main(int argc, char **argv)
 		case 'w': wallpaper = optarg; break;
 		case 'n': notifydir = optarg; break;
 		case 's': settings = optarg; break;
+		case 'k': hookdir = optarg; break;
 		default:
 			fprintf(stderr, "usage: %s [-v] [-f FBNAME] [-B BACKLIGHT] [-t SHOW_MS] "
-				"[-w WALLPAPER] [-n NOTIFYDIR] [-s SETTINGS]\n", argv[0]);
+				"[-w WALLPAPER] [-n NOTIFYDIR] [-s SETTINGS] [-k HOOKDIR]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -715,10 +889,20 @@ int main(int argc, char **argv)
 			/* redraw every second for the clock, 20 times a second for
 			 * a scrolling ticker */
 			r = ticking ? 50 - (int)(t % 50) : 1000 - (int)(t % 1000);
+			if (volume_until > t && volume_until - t < r)
+				r = (int)(volume_until - t);
 			if (r < timeout)
 				timeout = r;
 		} else if (lit) {
 			panel_off();
+		}
+		if (held && !held_long) {	/* the long press fires while held */
+			int d = (int)(held_at + LONG_MS - t);
+
+			if (d < 0)
+				d = 0;
+			if (timeout < 0 || d < timeout)
+				timeout = d;
 		}
 
 		for (i = 0; i < ninputs; i++)
@@ -733,6 +917,18 @@ int main(int argc, char **argv)
 			wall_mtime = 0;
 			load_wallpaper();
 			redraw = true;
+		}
+		/* Long presses */
+		if (held && !held_long && now_ms() - held_at >= LONG_MS) {
+			held_long = true;
+			if (held == KEY_NUMERIC_B) {
+				if (lid_closed && lit) {
+					dismiss_shown();	/* inotify then redraws */
+					show_until = now_ms() + lit_ms();
+				}
+			} else {
+				media(held == KEY_VOLUMEUP ? "next" : "previous");
+			}
 		}
 		if (r <= 0) {
 			if (lit && show_until > now_ms())
@@ -754,9 +950,29 @@ int main(int argc, char **argv)
 						wake = true;
 					else
 						show_until = 0;
-				} else if (ev.type == EV_KEY && ev.value == 1 &&
-					   wake_key(ev.code)) {
-					dbg("key %d\n", ev.code);
+				} else if (ev.type == EV_KEY && wake_key(ev.code) &&
+					   ev.value == 1) {
+					dbg("key %d down\n", ev.code);
+					held = ev.code;
+					held_at = now_ms();
+					held_long = false;
+				} else if (ev.type == EV_KEY && ev.code == held &&
+					   ev.value == 0) {
+					/* A short press acts on release */
+					dbg("key %d up%s\n", ev.code, held_long ? " (long)" : "");
+					if (!held_long && held == KEY_NUMERIC_B) {
+						if (lid_closed && lit) {
+							cursor++;
+							shown_wrap = true;	/* past the oldest: newest */
+							redraw = true;
+						} else {
+							cursor = 0;
+						}
+					} else if (!held_long) {
+						media(held == KEY_VOLUMEUP ? "volume-up" : "volume-down");
+						redraw = true;
+					}
+					held = 0;
 					wake = true;
 				}
 			}
