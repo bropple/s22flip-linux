@@ -223,7 +223,7 @@ The ADSP boots `adsp.mbn` (shipped in the bring-up ramdisk) and the mainline QDS
 | Mic 1: under the keypad, near **#** (AMIC1) | `DEC1 MUX` = ADC1, gain `ADC1 Volume` |
 | Mic 2: the hole above the outer display (AMIC3) | `ADC2 MUX` = INP3, `DEC1/2 MUX` = ADC2 or ADC3 (identical data), gain **`ADC3 Volume`**. AMIC3 is amplified by the TX3 stage, not TX2 |
 
-The mic locations were found with a tap test, recording both mics in stereo. At `ADC1/3 Volume` = 4, speech held as for a call measured about −44 dBFS on mic 1. Final gains belong in a BENCtix-CAT UCM profile.
+The mic locations were found with a tap test, recording both mics in stereo. At `ADC1/3 Volume` = 4, speech held as for a call measured about −44 dBFS on mic 1. Final gains belong in a UCM profile.
 
 ### Loudspeaker (AW88194)
 
@@ -241,7 +241,7 @@ The amp is an Awinic AW88194 (chip ID 0x1806, product ID 1, DSP product ID 0x000
 - **What stock does:** it loads the AW88194 profile, reads the DSP product ID, then reloads the `aw88194A` profile.
 - **What our driver does:** it parses both profiles at probe. Once the PLL locks on the first stream, it reads the DSP ID and switches. 0x1f80 only reads back with the PLL running, which is why an early read returned 0x0000. It then loads the DSP firmware to 0x8c00, the config to 0x8600 and `VCALB` (0x37f9) to 0x866d, and checks that `WDT` is non-zero after enabling the DSP.
 - **Result during playback:** the state matches stock register for register: `SYSCTRL` 0x6440, `SYSST` 0x1311/0x3311, `WDT` counting, and the AGC registers 0x09/0x0a/0x0b = 0x5e69/0x0f06/0x0f06.
-- **Volume:** the default is stock's −4 dB, and the volume control writes the amp's `VOL` register. A BENCtix-CAT UCM profile should use "Speaker Volume" as the hardware playback volume.
+- **Volume:** the default is stock's −4 dB, and the volume control writes the amp's `VOL` register. A UCM profile should use "Speaker Volume" as the hardware playback volume.
 
 **How the reference was obtained: stock kernel, no Android** (`tools/mkstockref.sh`, `initramfs/stockref-init`).
 
@@ -290,22 +290,22 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
 
 ## Next steps
 
-Proposed before BENC:
-1. Headset jack and button test (needs wired earbuds).
-
-Proposed as BENCkernel-CAT updates:
+- **WiFi/Bluetooth coexistence:** A2DP audio stutters while WiFi transfers
+  data. Tune wcn36xx's BTC settings (`BTC_EXECUTION_MODE`, the
+  `BTC_STATIC_*` slice lengths) for A2DP.
+- **Wired headset over USB-C:** FSA4480 + Type-C audio accessory mode + PM8916
+  MBHC (see the table above); needs a passive USB-C to 3.5 mm adapter.
+- **FM radio:** the WCNSS iris receiver; no mainline driver. The antenna is
+  probably the USB-C headset cable.
 - **Touchscreen:** Chipsemi CHSC (needs a driver).
-- **Sensors on BLSP1 I2C-4,** which the ADSP owns on stock: accelerometer, light/proximity, pressure.
 - **Cameras:**
   - rear GC5035 + DW9714 (CAMSS/CCI)
   - flash LED
   - front GC02M2 (needs a driver)
-- **Smaller items:**
-  - Venus (enable `venus_mem`, add firmware)
-  - Bluetooth pairing, keypad backlight check, FM radio
-  - RTC offset handling (the PMIC RTC reads 1970)
-
-Then BENCkernel-CAT and BENCtix-CAT (Arch Linux ARM + OpenRC), with the root filesystem on the eMMC `userdata` partition. Modem-with-SIM work comes after that.
+- **Smaller items:** Venus (enable `venus_mem`, add firmware), keypad
+  backlight check, a UCM profile for the built-in audio.
+- **Modem with a SIM:** registration, calls, SMS, data. The modem has
+  modem-side IMS and carrier profiles, so VoLTE looks possible.
 
 ## Contents of `dump/`
 
