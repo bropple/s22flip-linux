@@ -139,7 +139,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | Keypad debounce | Stock 3 ms gives double presses (domes chatter up to ~35 ms); 30 ms in our DTS |
 | Suspend (s2idle) | **Works** (4 of 4). Wakes on RTC alarm, power key, lid and keypad (volume up is also a wake source). All four cores and the CPU cluster power down while asleep. Both displays blank and come back (console on the main panel, splash on the outer one), and the USB network link reconnects by itself. Not yet checked: WiFi/modem across suspend, battery drain while asleep (needs the phone unplugged). `mem` is the same s2idle; there's no deeper state |
 | Charger (LBC) + BMS | Charging, capacity reported |
-| WCNSS + WCN3610 | **WiFi works end to end:** scan (2.4 GHz only), WPA2-PSK/CCMP association on 802.11n, DHCP, DNS, NTP and HTTPS. Tested with `wpa_supplicant` from a RAM-only Alpine root. **Bluetooth works:** a Bluetooth LE keyboard pairs and types, and A2DP audio (SBC) plays to a classic speaker through PipeWire (bluez 5.87). A2DP stutters while WiFi transfers data (the 2.4 GHz radio is shared; perfect with `wlan0` down); wcn36xx's BTC coexistence settings need tuning |
+| WCNSS + WCN3610 | **WiFi works end to end:** scan (2.4 GHz only), WPA2-PSK/CCMP association on 802.11n, DHCP, DNS, NTP and HTTPS. Tested with `wpa_supplicant` from a RAM-only Alpine root. **Bluetooth works:** a Bluetooth LE keyboard pairs and types, and A2DP audio (SBC) plays to a classic speaker through PipeWire (bluez 5.87). A2DP used to stutter while WiFi transferred data: wcn36xx started the WCN3610 in BTC execution mode 2 (PTA only). Qualcomm's prima default, mode 0 (smart), keeps A2DP smooth during a sustained download with the same WiFi throughput when Bluetooth is idle; mode 5 (A2DP-weighted) starves WiFi association. Our kernel now defaults to 0 (`btc_mode` module parameter for testing) |
 | eMMC, microSD | Detected |
 | WUSB3801 Type-C | **Works.** Registers `port0` (sink/device), partner detected, 3.0 A. Root cause of the old first-probe failure: the **first transfer on I²C bus 0 after boot is lost** (NACKed, `-ENXIO`) whatever the address or timing, while SDA/SCL read idle-high before and after; it's a QUP controller first-activation glitch, not the PMIC or the chip. Fix in our fork: buses marked `cat,first-transfer-lost` (only `blsp2_i2c1`) get one dummy 1-byte read to the reserved address 0x7f in `i2c-qup` probe, before any client sees the bus; the WUSB3801 now initializes on its first try (3 of 3 boots, the last without any driver retry). An earlier driver-side retry (5 × 10 ms on `-ENXIO`) was committed and then reverted; it's in the `s22flip` history if the problem shows up elsewhere. Datasheet notes: ENB is active low, so stock's `wusb3801,reset-gpio = 12` (really the outer backlight) is bogus |
 | USB host (OTG) | **Probably data-capable, but no VBUS.** Stock sets the controller to OTG (`qcom,hsusb-otg-mode = 3`) and the WUSB3801 to dual-role (`drp-toggle-time`, `host-current`), but the USB node has no VBUS supply and the PM8916 linear charger has no OTG boost; no external 5 V boost regulator exists in the stock DT. Devices (even self-powered hubs) normally wait for host VBUS before connecting, so host mode would need an adapter that injects external 5 V, outside the Type-C spec. Untested. Bluetooth is the simpler route for a keyboard |
@@ -290,9 +290,8 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
 
 ## Next steps
 
-- **WiFi/Bluetooth coexistence:** A2DP audio stutters while WiFi transfers
-  data. Tune wcn36xx's BTC settings (`BTC_EXECUTION_MODE`, the
-  `BTC_STATIC_*` slice lengths) for A2DP.
+- **WiFi throughput:** about 0.3 MB/s on a healthy link (−51 dBm, rx 39 Mbit/s);
+  the tx bitrate sits at MCS 0. Investigate rate control and power save.
 - **Wired headset over USB-C:** FSA4480 + Type-C audio accessory mode + PM8916
   MBHC (see the table above); needs a passive USB-C to 3.5 mm adapter.
 - **FM radio:** the WCNSS iris receiver; no mainline driver. The antenna is
