@@ -35,9 +35,10 @@ it, plus the tools and bring-up scripts to run mainline Linux on it.
 | ✅ | **Modem** | Boots, QMI, goes online and measures LTE cells (no SIM tested yet) |
 | ✅ | **USB-C** | Charging, battery level, USB networking (WUSB3801 Type-C) |
 | ✅ | **Suspend** | s2idle; wakes on power key, lid, keypad, RTC |
-| 🟡 | **Bluetooth** | Registers (`hci0`); pairing not tested yet |
+| ✅ | **Bluetooth** | Keyboards (LE) and audio (A2DP to speakers/headphones); audio stutters during WiFi transfers (shared radio, tuning pending) |
 | 🟡 | **Calls, SMS, mobile data** | Modem-side IMS and a T-Mobile profile are present; needs a SIM to test |
-| 🟡 | **Headset jack, vibration motor** | Detected; not tested |
+| 🟡 | **Vibration motor** | Detected; not tested |
+| 🟡 | **Wired headset** | No 3.5 mm jack: analog audio over USB-C through an FSA4480 switch, passive adapters only; not supported yet |
 | 🟡 | **USB host (OTG)** | Probably data-capable, but the phone cannot power the port |
 | ❌ | **Cameras, flash LED, video decoding (Venus), touchscreen, FM radio** | Not started |
 
