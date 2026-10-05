@@ -315,6 +315,21 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
   the WCN 5-wire pins (GPIO 76-80 run pull-down, unlike stock's active state).
   Prima's complete start configuration (177 settings, captured from its own
   trace output) and its 23 dBm power cap made no difference either.
+  Deep sleep (2026-10-05): the RPM's own counters (XO shutdown "vlow", VDD
+  minimization "vmin", per-master sleep stats in RPM message RAM) showed
+  none ever entered. Two causes fixed in our kernel: msm8917 lacked the CPU
+  cluster idle state that notifies the RPM (downstream "l2-pc", PSCI
+  0x41000053), and the msm8916 digital codec held its master clock (an ADSP
+  clock) from probe, which kept the ADSP awake; it now follows the bias
+  level. CPUs, ADSP and WCNSS now sleep; the modem never does (no SIM, also
+  in low-power and offline mode), so vlow/vmin stay at 0. Suspend, lid
+  closed, USB data connected: 141 -> 122 mA; awake idle lid closed ~165 ->
+  ~145 mA. The modem also needs a TFTP server (stock: tftp_server) for its
+  MCFG indexes (modem_pr/mcfg/...); tqftpserv serves them.
+  WiFi power, measured with a USB inline meter (2026-10-05, screen on, battery
+  full, linear charger so input current = system current): idle with power
+  save off ~275 mA total, power save on ~258 mA (-17 mA), downloading ~298 mA
+  (+23 mA), interface down ~241 mA (-34 mA).
   What the hardware is certified for (public FCC filing ZL5S22F, WiFi
   report SZ21010168W07): 802.11b/g/n on channels 1-11, HT20 MCS 0-7 (up to
   65 Mbit/s, 72.2 with short GI) and HT40 on channels 3-9, about 17-18 dBm
