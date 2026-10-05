@@ -123,6 +123,7 @@ fastboot flash boot lk2nd.img
 ```
 lk2nd then reports `lk2nd:model: Cat S22 Flip (S22FLIP)` and `lk2nd:panel: qcom,mdss_dsi_st7701s_vga_video`. Its own `fastboot boot` works for test kernels.
 
+- **Reaching lk2nd's fastboot from Linux (2026-10-05):** `reboot bootloader` can't work, because the stock bootloader runs first, reads the reboot reason (PON `SOFT_RB_SPARE` bits 7:2), scrubs it and enters its own fastboot. IMEM's restart-reason word doesn't survive the reset (PSCI SYSTEM_RESET power-cycles the SoC). What works: a magic byte (`0x6c`) in PON `DVDD_RB_SPARE` (PMIC 0x88D), which survives the reset and which the stock bootloader neither reads nor clears. Our lk2nd checks it, clears it and stays in fastboot; the kernel's `qcom-pon` exposes it as a one-shot `lk2nd_fastboot` sysfs switch (and clears a leftover at boot). Set it, reboot normally, and the phone lands in lk2nd's fastboot without a key press.
 - Stock `fastboot boot` never works for lk2nd here. With the DTB fixes it gets past the DTB check, then `cmd_boot` fails silently ("unknown reason"). Padding the image to the AVB `boot` size (32 MiB) didn't help.
 - To go back to Android, flash the stock `dtbo` and `boot` images.
 
@@ -290,9 +291,34 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
 
 ## Next steps
 
-- **WiFi throughput:** about 10 Mbit/s against a 20–39 Mbit/s link rate (after
-  the coexistence settings above). TX aggregation never starts (mac80211
-  `agg_status`); investigate that next.
+- **WiFi throughput (parked 2026-10-05):** mainline wcn36xx settles at MCS 2 in both directions
+  under load (LAN about 1.4-1.5 MB/s down, 0.8 MB/s up at -46 dBm). The
+  router starts higher (MCS 5-7 right after association) and falls back once
+  traffic flows. Stock prima on the stock kernel (same router and NV file,
+  Bluetooth off, -60 dBm) moves 1.8-3.0 MB/s down and about 1.2-1.5 MB/s up,
+  so there is a real gap of roughly 1.5-2x, mostly on upload. Prima's
+  reported 72.2 Mbit/s (MCS 7, short GI) is not a measurement: its default
+  `gReportMaxLinkSpeed` reports the maximum for the signal level. Ruled out on
+  mainline: Bluetooth (same with BT powered off), the advertised HT
+  capabilities (stock's 0x012c makes no difference), block-ack sessions (up
+  in both directions, window 64 as on prima), the receive path (CPU mostly
+  idle, no drops), the radio's supply rails (same as stock), the XO mode
+  (19.2 MHz, as stock), and prima's BSS/station parameters (basic rate set,
+  protection mode, MIMO power save, retry limits). One real bug was found
+  and fixed: with a router that offers no 802.11b rates, wcn36xx told the
+  firmware the router had no legacy rates at all. EDCA (which wcn36xx never
+  configured) made no difference either, nor did reporting the battery level
+  to the firmware as the downstream driver does. Against a different access
+  point (a phone hotspot at -33 dBm) the link also settles at MCS 2 or below
+  under load, so the cause is on the phone's side, not the router's. Also
+  matching stock with no effect: the per-frame TX descriptor, and pull-up on
+  the WCN 5-wire pins (GPIO 76-80 run pull-down, unlike stock's active state).
+  Prima's complete start configuration (177 settings, captured from its own
+  trace output) and its 23 dBm power cap made no difference either.
+  What the hardware is certified for (public FCC filing ZL5S22F, WiFi
+  report SZ21010168W07): 802.11b/g/n on channels 1-11, HT20 MCS 0-7 (up to
+  65 Mbit/s, 72.2 with short GI) and HT40 on channels 3-9, about 17-18 dBm
+  average conducted power, PIFA antenna with 0.18 dBi gain.
 - **Wired headset over USB-C:** FSA4480 + Type-C audio accessory mode + PM8916
   MBHC (see the table above); needs a passive USB-C to 3.5 mm adapter.
 - **FM radio:** the WCNSS iris receiver; no mainline driver. The antenna is
