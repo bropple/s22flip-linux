@@ -226,6 +226,7 @@ static void on_term(int sig) { (void)sig; quit = 1; }
 
 int main(int argc, char **argv)
 {
+	struct sigaction sa = { 0 };
 	long long last = 0;
 	int opt, in;
 
@@ -251,8 +252,11 @@ int main(int argc, char **argv)
 		perror("s22-notifyd: inotify");
 		return 1;
 	}
-	signal(SIGTERM, on_term);
-	signal(SIGINT, on_term);
+	/* No SA_RESTART: the signal must interrupt the blocking read() */
+	sa.sa_handler = on_term;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
 	fprintf(stderr, "s22-notifyd: watching %s\n", notifydir);
 
 	while (!quit) {

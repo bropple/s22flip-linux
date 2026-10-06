@@ -149,7 +149,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | Modem | **Registers on LTE and receives SMS** (see "Modem" and "Modem with a SIM" below): boots, QMI over QRTR, IMEI and firmware revision match stock, picks the carrier's MCFG profile itself. Calls and data not yet; bam-dmux never comes up |
 | Sensors (ADSP) | **Accelerometer, proximity, light and pressure all work** through the ADSP with our own daemon `s22-sensord` (see "Sensors through the ADSP"). The sensor bus is locked to the ADSP |
 | Audio | **Earpiece, both built-in mics and the loudspeaker work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`, PM8916 codec, AW88194A amp on Quinary MI2S with our own driver, speaker protection DSP running. Headset jack untested |
-| Venus | Needs `venus.mbn`, which isn't in the ramdisk |
+| Venus | Needs `venus.mbn`, which isn't in the ramdisk. Disabled in our DT until then: a Venus that never probes blocks GCC's sync_state, which kept the display power domain on |
 
 lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0x83400000`, ramdisk at `0x83600000`. The ramdisk must end below the reserved region at `0x85b00000`.
 
@@ -355,6 +355,28 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
   closed, USB data connected: 141 -> 122 mA; awake idle lid closed ~165 ->
   ~145 mA. The modem also needs a TFTP server (stock: tftp_server) for its
   MCFG indexes (modem_pr/mcfg/...); tqftpserv serves them.
+  The RPM-notifying cluster state needs the MPM wake controller: in it the
+  CPUs wake only for MPM pins and the MPM's timer. Without the MPM described,
+  kernel timers stopped firing once the modem was stopped ("sleep 1" never
+  returned, and reboots hung, since shutdown stops the modem). Now described
+  in our kernel: the vMPM in RPM message RAM (0x601d0, 64 pins, woken by GIC
+  SPI 171, told through APCS IPC bit 1), GIC pins from the downstream
+  msm8937 table (tsens 2, USB 49/58, PMIC arbiter 62; pin 53 is shared with
+  GPIO 62 and left to the GPIO), the GPIO wake map (47 GPIOs, including the
+  lid, volume up and keypad rows), and the CPU cluster power domain as its
+  child. Mainline's MPM driver never wrote the next wakeup time into the
+  vMPM timer words, which downstream does before every sleep; ours does.
+  With the modem stopped, timers keep time and reboots take about 55 s.
+  Also: cpuidle-psci creates its device once, and gave up when the CPU power
+  domains (now waiting for the MPM) were not there yet; ours retries.
+  Display wedge on lid open (2026-10-05): "hw recovery is not complete for
+  ctl:1", then a blue screen. GCC's sync_state never ran because Venus (no
+  firmware) never probed, so the display power domain left on by the
+  bootloader's splash never switched off; DPU registers kept stale flush and
+  reset state across display off/on. With Venus disabled until it is set up,
+  the display domain powers off with the lid closed and 60 off/on cycles ran
+  clean; the DPU also no longer waits for a stale flush on a disabled
+  encoder.
   WiFi power, measured with a USB inline meter (2026-10-05, screen on, battery
   full, linear charger so input current = system current): idle with power
   save off ~275 mA total, power save on ~258 mA (-17 mA), downloading ~298 mA
