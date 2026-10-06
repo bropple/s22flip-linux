@@ -1,0 +1,271 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-imsd: the AP side of the modem's IMS data connection.
+
+The modem's own IMS stack asks the AP to bring up the IMS PDN, over QMI
+service 770 ("IMS data service") which Android's imsdatadaemon hosts. With
+nobody answering, the modem retries forever: RRC connected, transmitting,
+never power collapsing. This daemon hosts the service on QRTR, brings the
+PDN up with WDS when asked (the modem names the APN, IP family and WDS
+profile; on the Cat S22 Flip with a T-Mobile SIM: "ims", IPv6, profile 2),
+and hands the modem its address. Only the IMS PDN, never internet data.
+
+Protocol (the request and indication match libqmi's IMSDCM definitions):
+  0x20 PDP Activate request  TLV 0x01 {u8-len APN, u32 APN type, u32 RAT,
+                             u32 IP family (0 v4, 1 v6), u16 WDS profile},
+                             0x10 u32 sequence, 0x11 subscription,
+                             0x12 slot, 0x13 u32 instance.
+       response              0x02 result, 0x10 u8 PDP id, 0x11 sequence,
+                             0x12 instance
+       indication            0x01 PDP id, 0x10 sequence, 0x11 {u32 family,
+                             u8-len address}, 0x12 instance
+  0x21 PDP Deactivate        0x01 PDP id, 0x10 instance
+  Other requests the modem sends at start (0x23, 0x2e, 0x34) get a plain
+  success response.
+
+  s22-imsd [-v]
+"""
+import ipaddress, signal, socket, struct, sys, time
+
+AF_QIPCRTR, PORT_CTRL, NEW_SERVER = 42, 0xFFFFFFFE, 4
+SERVICE, VERSION, INSTANCE = 770, 1, 0
+REQ, RSP, IND = 0, 2, 4
+PDP_ACTIVATE, PDP_DEACTIVATE = 0x20, 0x21
+IP_V6 = 1
+CHECK_S = 60
+verbose = "-v" in sys.argv[1:]
+
+
+def log(*a):
+    print("s22-imsd:", *a, file=sys.stderr, flush=True)
+
+
+def dbg(*a):
+    if verbose:
+        log(*a)
+
+
+def tlv(t, v):
+    return struct.pack("<BH", t, len(v)) + v
+
+
+def u32(v):
+    return struct.pack("<I", v)
+
+
+def parse(b):
+    out, p = {}, 0
+    while p + 3 <= len(b):
+        t, ln = struct.unpack_from("<BH", b, p)
+        out[t] = b[p + 3:p + 3 + ln]
+        p += 3 + ln
+    return out
+
+
+OK = tlv(0x02, struct.pack("<HH", 0, 0))
+
+
+def main():
+    import gi
+    gi.require_version("Qmi", "1.0")
+    gi.require_version("Qrtr", "1.0")
+    from gi.repository import GLib, Qmi, Qrtr
+
+    ctx = GLib.MainContext.default()
+
+    def wait(start, finish):
+        box = []
+        start(lambda _s, res, *_: box.append(res))
+        while not box:
+            ctx.iteration(True)
+        return finish(box[0])
+
+    def req(client, name, inp, timeout=30):
+        out = wait(lambda cb: getattr(client, name)(inp, timeout, None, cb),
+                   getattr(client, name + "_finish"))
+        out.get_result()
+        return out
+
+    bus = wait(lambda cb: Qrtr.Bus.new(1000, None, cb), Qrtr.Bus.new_finish)
+    while True:
+        try:
+            node = wait(lambda cb: bus.wait_for_node(0, 30000, None, cb),
+                        bus.wait_for_node_finish)
+            break
+        except GLib.Error:
+            dbg("waiting for the modem")
+    dev = wait(lambda cb: Qmi.Device.new_from_node(node, None, cb),
+               Qmi.Device.new_from_node_finish)
+    wait(lambda cb: dev.open(Qmi.DeviceOpenFlags(0), 15, None, cb),
+         dev.open_finish)
+
+    def client(service):
+        return wait(lambda cb: dev.allocate_client(service, 0, 10, None, cb),
+                    dev.allocate_client_finish)
+
+    BAM = Qmi.DataEndpointType.BAM_DMUX
+    st = {"wds": None, "handle": None, "addr": None, "family": None, "ported": False}
+
+    def data_port():
+        """netmgrd's setup: DPM port and raw-IP data format on bam-dmux 0."""
+        if st["ported"]:
+            return
+        dpm = client(Qmi.Service.DPM)
+        i = Qmi.MessageDpmOpenPortInput()
+        c = Qmi.MessageDpmOpenPortInputControlPortsElement()
+        c.port_name, c.endpoint_type, c.interface_number = "DATA5_CNTL", BAM, 0
+        h = Qmi.MessageDpmOpenPortInputHardwareDataPortsElement()
+        h.endpoint_type, h.interface_number = BAM, 0
+        h.rx_endpoint_number = h.tx_endpoint_number = 0
+        i.set_control_ports([c])
+        i.set_hardware_data_ports([h])
+        try:
+            req(dpm, "open_port", i)
+        except GLib.Error as e:
+            dbg("DPM open port: %s" % e.message)
+        wda = client(Qmi.Service.WDA)
+        i = Qmi.MessageWdaSetDataFormatInput()
+        i.set_link_layer_protocol(Qmi.WdaLinkLayerProtocol.RAW_IP)
+        i.set_uplink_data_aggregation_protocol(Qmi.WdaDataAggregationProtocol.DISABLED)
+        i.set_downlink_data_aggregation_protocol(Qmi.WdaDataAggregationProtocol.DISABLED)
+        i.set_endpoint_info(BAM, 0)
+        req(wda, "set_data_format", i)
+        st["ported"] = True
+
+    def bring_up(profile, family):
+        data_port()
+        if st["wds"] is None:
+            st["wds"] = client(Qmi.Service.WDS)
+            i = Qmi.MessageWdsBindMuxDataPortInput()
+            i.set_endpoint_info(BAM, 0)
+            i.set_mux_id(0)
+            req(st["wds"], "bind_mux_data_port", i)
+        wds = st["wds"]
+        fam = Qmi.WdsIpFamily.IPV6 if family == IP_V6 else Qmi.WdsIpFamily.IPV4
+        i = Qmi.MessageWdsSetIpFamilyInput()
+        i.set_preference(fam)
+        req(wds, "set_ip_family", i)
+        i = Qmi.MessageWdsStartNetworkInput()
+        i.set_profile_index_3gpp(profile)
+        i.set_ip_family_preference(fam)
+        st["handle"] = req(wds, "start_network", i, 60).get_packet_data_handle()
+        i = Qmi.MessageWdsGetCurrentSettingsInput()
+        i.set_requested_settings(Qmi.WdsRequestedSettings(0xffff))
+        s = req(wds, "get_current_settings", i)
+        if family == IP_V6:
+            a, _ = s.get_ipv6_address()
+            addr = str(ipaddress.IPv6Address(b"".join(int(x).to_bytes(2, "big") for x in a)))
+        else:
+            addr = str(ipaddress.IPv4Address(s.get_ipv4_address()))
+        st["addr"], st["family"] = addr, family
+        log("IMS PDN up (profile %d)" % profile)
+        return addr
+
+    def tear_down():
+        if st["handle"] is not None and st["wds"] is not None:
+            i = Qmi.MessageWdsStopNetworkInput()
+            i.set_packet_data_handle(st["handle"])
+            try:
+                req(st["wds"], "stop_network", i)
+                log("IMS PDN down")
+            except GLib.Error as e:
+                log("stop: %s" % e.message)
+        st["handle"] = st["addr"] = None
+
+    def still_up():
+        """Forget the PDN if the network dropped it; the modem will ask again."""
+        if st["handle"] is None or st["wds"] is None:
+            return True
+        try:
+            out = req(st["wds"], "get_packet_service_status", None)
+            if out.get_connection_status() != Qmi.WdsConnectionStatus.CONNECTED:
+                log("IMS PDN dropped by the network")
+                st["handle"] = st["addr"] = None
+        except GLib.Error as e:
+            dbg("status: %s" % e.message)
+        return True
+
+    sock = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM)
+    sock.bind((1, 0))
+    lnode, lport = sock.getsockname()
+    sock.sendto(struct.pack("<5I", NEW_SERVER, SERVICE,
+                            (VERSION & 0xFF) | (INSTANCE << 8), lnode, lport),
+                (lnode, PORT_CTRL))
+    log("hosting IMS data service %d on %d:%d" % (SERVICE, lnode, lport))
+
+    def send(addr, typ, txn, mid, body):
+        sock.sendto(struct.pack("<BHHH", typ, txn, mid, len(body)) + body, addr)
+
+    def indicate(addr, pdp_id, seq, inst):
+        ab = st["addr"].encode()
+        send(addr, IND, 0, PDP_ACTIVATE,
+             tlv(0x01, bytes([pdp_id])) + tlv(0x10, u32(seq))
+             + tlv(0x11, u32(st["family"]) + bytes([len(ab)]) + ab)
+             + tlv(0x12, u32(inst)))
+
+    def on_msg(*_):
+        data, addr = sock.recvfrom(65536)
+        if len(data) < 7:
+            return True
+        typ, txn, mid, ln = struct.unpack_from("<BHHH", data, 0)
+        if typ != REQ:
+            return True                 # QRTR control (client gone, ...)
+        t = parse(data[7:7 + ln])
+        if mid == PDP_ACTIVATE:
+            cp = t.get(0x01, b"")
+            n = cp[0] if cp else 0
+            apn = cp[1:1 + n].decode("ascii", "replace")
+            _apn_type, _rat, family, profile = struct.unpack_from("<IIIH", cp, 1 + n)
+            seq = struct.unpack("<I", t.get(0x10, u32(0)))[0]
+            inst = struct.unpack("<I", t.get(0x13, u32(1)))[0]
+            log("modem asks for the %s PDN (profile %d, %s)"
+                % (apn, profile, "IPv6" if family == IP_V6 else "IPv4"))
+            send(addr, RSP, txn, mid, OK + tlv(0x10, b"\x01")
+                 + tlv(0x11, u32(seq)) + tlv(0x12, u32(inst)))
+            try:
+                if st["addr"] is None or st["family"] != family:
+                    tear_down()
+                    bring_up(profile, family)
+                indicate(addr, 1, seq, inst)
+            except GLib.Error as e:
+                log("bring-up failed: %s" % e.message)
+        elif mid == PDP_DEACTIVATE:
+            log("modem releases the IMS PDN")
+            send(addr, RSP, txn, mid, OK + tlv(0x10, t.get(0x01, b"\x01"))
+                 + tlv(0x11, t.get(0x10, u32(1))))
+            tear_down()
+        else:
+            dbg("request 0x%02x -> ok" % mid)
+            send(addr, RSP, txn, mid, OK)
+        return True
+
+    loop = GLib.MainLoop()
+
+    def stop(*_):
+        loop.quit()
+        return False
+
+    def removed(*_):
+        log("modem went away; exiting")
+        loop.quit()
+
+    GLib.io_add_watch(sock.fileno(), GLib.IO_IN, on_msg)
+    GLib.timeout_add_seconds(CHECK_S, still_up)
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except (ImportError, ValueError):
+        add_signal = GLib.unix_signal_add
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop)
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop)
+    dev.connect("device-removed", removed)
+    try:
+        loop.run()
+    finally:
+        tear_down()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

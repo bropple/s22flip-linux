@@ -229,6 +229,26 @@ EFS from files, tqftpserv for the MCFG indexes):
   autoconnect query (`InvalidOperation`).
 - **Phone number:** `qmicli --dms-get-msisdn` reads the number the network
   wrote to the SIM.
+- **Why the modem never slept (2026-10-06):** its own IMS stack asks the AP
+  to bring up the IMS PDN, over QMI service 770 ("IMS data service", hosted
+  by Android's imsdatadaemon), and retried forever when nobody answered: the
+  modem stayed RRC connected and transmitting, 0 power collapses ever. Its
+  debug messages (read over DIAG from Linux: SMD channels DIAG/DIAG_CNTL, a
+  minimal feature mask, raw commands, HDLC-framed replies, F3 masks set over
+  the control channel) said so: "QMI send failed !! IMS PDN cannot be brought
+  up on AP". `tools/s22-imsd` hosts service 770 on QRTR: the modem sends
+  three setup requests and a PDP Activate request (APN `ims`, IPv6, WDS
+  profile 2 here); s22-imsd opens the DPM port, sets the raw-IP data format
+  on bam-dmux, starts that profile with WDS and returns the address in the
+  PDP Activate indication (layouts as in libqmi's IMSDCM definitions). The
+  modem then power-collapses about every 0.6 s, asleep ~98% of the time.
+  IMS voice registration is not complete yet. The network offers voice only
+  over IMS (no CS fallback).
+- **Bringing up data on bam-dmux:** the modem raises its bam-dmux power bit
+  only when the AP asks first (bam-dmux runtime resume), and opens channels
+  only after a DPM open port (control `DATA5_CNTL`, hardware data port
+  bam-dmux endpoint 0). Then: WDA raw-IP with that endpoint, WDS bind mux
+  data port, start network.
 
 ## Main display (working, 2026-10-03)
 
@@ -367,6 +387,12 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
   child. Mainline's MPM driver never wrote the next wakeup time into the
   vMPM timer words, which downstream does before every sleep; ours does.
   With the modem stopped, timers keep time and reboots take about 55 s.
+  Once the modem slept, the RPM did reach VDD minimization in that state, but
+  stopped XO under active peripherals (the outer display's SPI transfers
+  timed out, the display controller wedged): GCC here is fed by a fixed
+  board XO and never votes XO in the RPM's sleep set, which downstream's
+  peripheral clocks do. The RPM-notifying state is out again until GCC
+  holds that vote.
   Also: cpuidle-psci creates its device once, and gave up when the CPU power
   domains (now waiting for the MPM) were not there yet; ours retries.
   Display wedge on lid open (2026-10-05): "hw recovery is not complete for
