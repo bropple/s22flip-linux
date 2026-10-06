@@ -455,6 +455,10 @@ static int battery(bool *charging)
 		}
 	}
 	closedir(d);
+	/* s22-batteryd's smoothed capacity, when it runs: the voltage-mode
+	 * gauge's own value jumps with load and charging */
+	if (*get("/run/s22-battery/capacity", buf, sizeof(buf)))
+		cap = atoi(buf);
 	return cap;
 }
 
