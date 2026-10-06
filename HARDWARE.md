@@ -242,8 +242,18 @@ EFS from files, tqftpserv for the MCFG indexes):
   on bam-dmux, starts that profile with WDS and returns the address in the
   PDP Activate indication (layouts as in libqmi's IMSDCM definitions). The
   modem then power-collapses about every 0.6 s, asleep ~98% of the time.
-  IMS voice registration is not complete yet. The network offers voice only
-  over IMS (no CS fallback).
+  IMS registration needs the operation result (field 0x02) in that
+  indication too (documented by 81voltd): without it the modem never tries
+  to register and releases the PDN after ~15 minutes, in a 20-minute cycle.
+  With it IMS registers within seconds (voice, SMS and UT over LTE) and the
+  modem is asleep ~98% of the time. The network offers voice only over IMS.
+- **VoLTE calls work (2026-10-06):** QMI Voice for call control; the audio
+  is the modem's voice session on the ADSP, started by holding the hostless
+  q6voice VoiceMMode1 PCM open in both directions (playback with the stop
+  threshold at the boundary, or it stops on an underrun at once) and routed
+  with the q6routing voice mixers to Primary MI2S (earpiece) and from
+  Tertiary MI2S (keypad microphone). `tools/s22-call`: ring, answer by
+  opening the flip or the Call key, hang up by closing it or End.
 - **Bringing up data on bam-dmux:** the modem raises its bam-dmux power bit
   only when the AP asks first (bam-dmux runtime resume), and opens channels
   only after a DPM open port (control `DATA5_CNTL`, hardware data port

@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Voice calls without a GUI: ring, answer with the lid or Call key,
+# end with the lid or End key, call audio to the earpiece.
+
+description="Voice calls"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-calld
+command_args="${CALL_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-call.log
+error_log=/var/log/s22-call.log
+
+depend() {
+	need rmtfs
+	after s22-imsd s22-notifyd
+}

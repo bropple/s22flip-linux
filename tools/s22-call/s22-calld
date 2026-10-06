@@ -1,0 +1,384 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-calld: voice calls without a GUI.
+
+Watches the modem's QMI Voice call status. An incoming call rings (the
+vibrator, repeating) and posts a "call" notification with the caller's
+number. It is answered by opening the lid or the Call key, and ended or
+rejected by closing the lid or the End key (the power key, short press).
+While a call is up, the call audio (the modem's voice session on the ADSP,
+VoiceMMode1) is routed to the earpiece and the keypad microphone, and the
+voice PCM is held open; it is undone when the last call ends.
+
+Outgoing calls and control: `s22-call` talks to this daemon over
+/run/s22-call.sock (root and group wheel): dial NUMBER, answer, hangup,
+status. Nothing is ever dialled by the daemon itself.
+
+Settings in /etc/conf.d/s22-call: CALL_ARGS, -v verbose, -L to disable
+lid answer/hang-up.
+
+  s22-calld [-v] [-L]
+"""
+import fcntl, grp, os, signal, socket, struct, subprocess, sys, time
+
+SOCK = "/run/s22-call.sock"
+PCM = "hw:0,3"
+LID_ACTIONS = "-L" not in sys.argv[1:]
+verbose = "-v" in sys.argv[1:]
+
+EV_KEY, EV_SW, EV_FF = 0x01, 0x05, 0x15
+KEY_ENTER, KEY_POWER, SW_LID = 28, 116, 0
+RING = (900, 600)                       # on, off ms
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), "s22-calld:", *a, file=sys.stderr, flush=True)
+
+
+def dbg(*a):
+    if verbose:
+        log(*a)
+
+
+# ------------------------------------------------------------------ audio
+MIXER_ON = [
+    ("PRI_MI2S_RX Voice Mixer VoiceMMode1", "1"),
+    ("RX1 MIX1 INP1", "RX1"),
+    ("EAR_S", "Switch"),
+    ("RX1 Digital Volume", "84"),
+    ("VoiceMMode1 Capture Mixer TERT_MI2S_TX", "1"),
+    ("CIC1 MUX", "AMIC"),
+    ("DEC1 MUX", "ADC1"),
+]
+MIXER_OFF = [
+    ("PRI_MI2S_RX Voice Mixer VoiceMMode1", "0"),
+    ("VoiceMMode1 Capture Mixer TERT_MI2S_TX", "0"),
+    ("EAR_S", "ZERO"),
+]
+
+
+def cset(name, value):
+    r = subprocess.run(["amixer", "-q", "-c", "0", "cset", "name=" + name, value],
+                       capture_output=True, text=True)
+    if r.returncode:
+        log("amixer %s=%s: %s" % (name, value, r.stderr.strip()))
+
+
+class Audio:
+    def __init__(self):
+        self.procs = []
+
+    def on(self):
+        if self.procs:
+            return
+        for n, v in MIXER_ON:
+            cset(n, v)
+        # Hostless: started and held, never read or written (s22-pcmhold)
+        self.procs = [subprocess.Popen(["s22-pcmhold", PCM], stderr=subprocess.PIPE)]
+        log("call audio on (earpiece, keypad mic)")
+
+    def off(self):
+        if not self.procs:
+            return
+        for p in self.procs:
+            p.terminate()
+        for p in self.procs:
+            try:
+                p.wait(3)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        self.procs = []
+        for n, v in MIXER_OFF:
+            cset(n, v)
+        log("call audio off")
+
+    def check(self):
+        for p in self.procs:
+            if p.poll() is not None:
+                err = p.stderr.read().decode(errors="replace").strip() if p.stderr else ""
+                log("voice PCM process exited (%s): %s" % (p.returncode, err[:200]))
+                self.procs.remove(p)
+
+
+# ------------------------------------------------------------------ input
+def find_inputs():
+    """(vibrator fd, [key/switch fds]) from /dev/input"""
+    vib, keys = None, []
+    for n in sorted(os.listdir("/dev/input")):
+        if not n.startswith("event"):
+            continue
+        try:
+            fd = os.open("/dev/input/" + n, os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
+            continue
+        name = bytearray(64)
+        try:
+            fcntl.ioctl(fd, (2 << 30) | (64 << 16) | (ord("E") << 8) | 0x06, name)
+        except OSError:
+            pass
+        name = name.split(b"\0")[0].decode(errors="replace")
+        ff = bytearray(16)
+        try:
+            fcntl.ioctl(fd, (2 << 30) | (16 << 16) | (ord("E") << 8) | (0x20 + EV_FF), ff)
+        except OSError:
+            pass
+        if vib is None and ff[0x50 // 8] & (1 << (0x50 % 8)):          # FF_RUMBLE
+            vib = fd
+        elif name in ("pm8941_pwrkey", "GPIO Buttons", "S22 Flip keypad (T9)"):
+            keys.append(fd)
+            dbg("input %s: %s" % (n, name))
+        else:
+            os.close(fd)
+    return vib, keys
+
+
+class Ringer:
+    """Repeating vibration through an FF_RUMBLE effect"""
+    def __init__(self, fd):
+        self.fd, self.id = fd, -1
+
+    def pulse(self, ms):
+        if self.fd is None:
+            return
+        # struct ff_effect (arm64, 48 bytes): type, id, direction,
+        # trigger{button, interval}, replay{length, delay}, 2 bytes padding,
+        # then the union (8-byte aligned, 32 bytes): rumble{strong, weak}
+        eff = struct.pack("<HhHHHHH2xHH", 0x50, self.id, 0, 0, 0, ms, 0, 0xC000, 0) + b"\0" * 28
+        buf = bytearray(eff)
+        try:
+            fcntl.ioctl(self.fd, (1 << 30) | (len(eff) << 16) | (ord("E") << 8) | 0x80, buf)
+            self.id = struct.unpack_from("<h", buf, 2)[0]
+            os.write(self.fd, struct.pack("<qqHHi", 0, 0, EV_FF, self.id, 1))
+        except OSError as e:
+            dbg("vibrate: %s" % e)
+
+
+# ------------------------------------------------------------------ main
+def main():
+    import gi
+    gi.require_version("Qmi", "1.0")
+    gi.require_version("Qrtr", "1.0")
+    from gi.repository import GLib, Qmi, Qrtr
+
+    ctx = GLib.MainContext.default()
+
+    def wait(start, finish):
+        box = []
+        start(lambda _s, res, *_: box.append(res))
+        while not box:
+            ctx.iteration(True)
+        return finish(box[0])
+
+    def req(client, name, inp, timeout=30):
+        out = wait(lambda cb: getattr(client, name)(inp, timeout, None, cb),
+                   getattr(client, name + "_finish"))
+        out.get_result()
+        return out
+
+    bus = wait(lambda cb: Qrtr.Bus.new(1000, None, cb), Qrtr.Bus.new_finish)
+    while True:
+        try:
+            node = wait(lambda cb: bus.wait_for_node(0, 30000, None, cb),
+                        bus.wait_for_node_finish)
+            break
+        except GLib.Error:
+            dbg("waiting for the modem")
+    dev = wait(lambda cb: Qmi.Device.new_from_node(node, None, cb),
+               Qmi.Device.new_from_node_finish)
+    wait(lambda cb: dev.open(Qmi.DeviceOpenFlags(0), 15, None, cb), dev.open_finish)
+    voice = wait(lambda cb: dev.allocate_client(Qmi.Service.VOICE, 0, 10, None, cb),
+                 dev.allocate_client_finish)
+    i = Qmi.MessageVoiceIndicationRegisterInput()
+    i.set_call_notification_events(True)
+    try:
+        req(voice, "indication_register", i)
+    except GLib.Error as e:
+        log("indication register: %s" % e.message)
+
+    audio = Audio()
+    vib, keys = find_inputs()
+    ringer = Ringer(vib)
+    calls = {}                 # id -> {"state", "dir", "number"}
+    st = {"ring_on": False}
+
+    def numbers_of(out):
+        nums = {}
+        try:
+            for e in out.get_remote_party_number():
+                n = getattr(e, "type", None)
+                nums[e.id] = n if isinstance(n, str) else ""
+        except (GLib.Error, AttributeError, TypeError):
+            pass
+        return nums
+
+    def update(out):
+        nums = numbers_of(out)
+        try:
+            info = out.get_call_information()
+        except GLib.Error:
+            return
+        for c in info:
+            state = Qmi.VoiceCallState(c.state).value_nick
+            prev = calls.get(c.id, {}).get("state")
+            calls[c.id] = {"state": state, "dir": Qmi.VoiceCallDirection(c.direction).value_nick,
+                           "number": nums.get(c.id) or calls.get(c.id, {}).get("number", "")}
+            if state != prev:
+                log("call %d %s: %s %s" % (c.id, calls[c.id]["dir"], state, calls[c.id]["number"]))
+                if state == "incoming":
+                    subprocess.run(["s22-notify", "-s", "call",
+                                    "Incoming call %s" % (calls[c.id]["number"] or "")])
+            if state in ("end",):
+                calls.pop(c.id, None)
+        react()
+
+    def react():
+        states = {c["state"] for c in calls.values()}
+        if states & {"conversation", "hold", "alerting", "origination", "cc-in-progress"}:
+            audio.on()
+        elif not states - {"incoming", "waiting"}:
+            audio.off()
+        st["ring_on"] = "incoming" in states
+
+    def ringing_id():
+        for cid, c in calls.items():
+            if c["state"] in ("incoming", "waiting"):
+                return cid
+        return None
+
+    def active_id():
+        for cid, c in calls.items():
+            if c["state"] not in ("end", "incoming", "waiting"):
+                return cid
+        return ringing_id()
+
+    def answer():
+        cid = ringing_id()
+        if cid is None:
+            return "no ringing call"
+        i = Qmi.MessageVoiceAnswerCallInput()
+        i.set_call_id(cid)
+        try:
+            req(voice, "answer_call", i)
+            return "answered call %d" % cid
+        except GLib.Error as e:
+            return "answer: %s" % e.message
+
+    def hangup():
+        cid = active_id()
+        if cid is None:
+            return "no call"
+        i = Qmi.MessageVoiceEndCallInput()
+        i.set_call_id(cid)
+        try:
+            req(voice, "end_call", i)
+            return "ended call %d" % cid
+        except GLib.Error as e:
+            return "end: %s" % e.message
+
+    def dial(number):
+        if not number or any(ch not in "+0123456789*#" for ch in number):
+            return "bad number"
+        i = Qmi.MessageVoiceDialCallInput()
+        i.set_calling_number(number)
+        try:
+            out = req(voice, "dial_call", i)
+            return "dialling (call %s)" % (out.get_call_id() if hasattr(out, "get_call_id") else "?")
+        except GLib.Error as e:
+            return "dial: %s" % e.message
+
+    def status():
+        if not calls:
+            return "no calls"
+        return "\n".join("%d %s %s %s" % (cid, c["dir"], c["state"], c["number"])
+                         for cid, c in sorted(calls.items()))
+
+    voice.connect("all-call-status", lambda _c, out: update(out))
+
+    # Key and lid events
+    def on_input(fd, _cond):
+        while True:
+            try:
+                ev = os.read(fd, 24)
+            except BlockingIOError:
+                break
+            if len(ev) < 24:
+                break
+            _s, _u, typ, code, val = struct.unpack("<qqHHi", ev)
+            if typ == EV_KEY and val == 1:
+                if code == KEY_ENTER and ringing_id() is not None:
+                    log("Call key: %s" % answer())
+                elif code == KEY_POWER and calls:
+                    log("End key: %s" % hangup())
+            elif typ == EV_SW and code == SW_LID and LID_ACTIONS:
+                if val == 0 and ringing_id() is not None:
+                    log("lid opened: %s" % answer())
+                elif val == 1 and calls:
+                    log("lid closed: %s" % hangup())
+        return True
+
+    for fd in keys:
+        GLib.io_add_watch(fd, GLib.IO_IN, on_input)
+
+    # Control socket
+    try:
+        os.unlink(SOCK)
+    except OSError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    os.chmod(SOCK, 0o660)
+    try:
+        os.chown(SOCK, 0, grp.getgrnam("wheel").gr_gid)
+    except (KeyError, OSError):
+        pass
+    srv.listen(4)
+
+    def on_client(_fd, _cond):
+        conn, _ = srv.accept()
+        try:
+            words = conn.recv(256).decode(errors="replace").split()
+            cmd = words[0] if words else ""
+            if cmd == "dial" and len(words) == 2:
+                reply = dial(words[1])
+            elif cmd == "answer":
+                reply = answer()
+            elif cmd == "hangup":
+                reply = hangup()
+            elif cmd == "status":
+                reply = status()
+            else:
+                reply = "usage: dial NUMBER | answer | hangup | status"
+            log("%s -> %s" % (" ".join(words), reply.splitlines()[0] if reply else ""))
+            conn.sendall((reply + "\n").encode())
+        finally:
+            conn.close()
+        return True
+
+    GLib.io_add_watch(srv.fileno(), GLib.IO_IN, on_client)
+
+    def tick():
+        audio.check()
+        if st["ring_on"]:
+            ringer.pulse(RING[0])
+        return True
+
+    GLib.timeout_add(sum(RING), tick)
+
+    loop = GLib.MainLoop()
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda *_: loop.quit() or False)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda *_: loop.quit() or False)
+    dev.connect("device-removed", lambda *_: loop.quit())
+    log("ready (lid answers and hangs up: %s)" % ("yes" if LID_ACTIONS else "no"))
+    try:
+        loop.run()
+    finally:
+        audio.off()
+        try:
+            os.unlink(SOCK)
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

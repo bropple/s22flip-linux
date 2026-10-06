@@ -122,6 +122,7 @@ walks through it step by step.
 | `tools/s22-smsd/` | Incoming text messages over QMI WMS (libqmi from Python): decoded, kept in an inbox file, posted as `sms` notifications, deleted from the modem; never starts mobile data |
 | `tools/s22-imsd/` | The AP side of the modem's IMS data connection (QMI service 770): brings up the IMS PDN when the modem's own IMS stack asks, without which the modem never sleeps |
 | `tools/s22-battery/` | Battery log every 5 minutes (charge, voltage, lid, modem and system sleep counters) and a one-shot clean power-off at 5%; keeps a smoothed capacity on top of the PM8916 voltage-mode gauge, which jumps with load |
+| `tools/s22-call/` | VoLTE calls without a GUI: rings, answers when the flip opens (or Call), hangs up when it closes (or End); holds the modem's hostless voice PCM (`s22-pcmhold`) and routes earpiece and keypad mic; `s22-call dial NUMBER\|answer\|hangup\|status` |
 | `tools/openrc/s22-console.map` | Console keymap additions (`/etc/s22-console.map`, see `conf.d/keymaps`): volume and power keys stop typing escape codes into the tty |
 | `tools/s22-partguard` | Make the eMMC partitions a system does not need read-only, with eMMC power-on write protection |
 | `tools/openrc/` | OpenRC services for an installed system: partition guard, zram, clock, USB network, rmtfs, sensors, keypad, lid, outer display ([list](tools/openrc/README.md)) |
