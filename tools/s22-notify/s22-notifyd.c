@@ -15,13 +15,21 @@
  *   strength=100            percent, for every pattern
  *
  * Without the file, every source gets 200,150,200. Alerts closer together
- * than one second are merged. Display is someone else's job (s22-outerd).
+ * than one second are merged. Display is someone else's job (s22-outerd,
+ * and s22-shell in the GUI).
+ *
+ * Dismissing: the directory is sticky, so only a notification's owner (or
+ * root) may delete it. Anyone else in group wheel asks by creating
+ * ".dismiss-NAME" there (s22-notify -d NAME); this deletes NAME and the
+ * marker.
  *
  *   s22-notifyd [-v] [-n NOTIFYDIR] [-p PATTERNS] [-d VIBRATOR]
  */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
@@ -224,6 +232,41 @@ static void source_of(const char *path, char *src, size_t len)
 static volatile sig_atomic_t quit;
 static void on_term(int sig) { (void)sig; quit = 1; }
 
+/* Root, or a member of group wheel */
+static bool may_dismiss(uid_t uid)
+{
+	struct passwd *pw = uid ? getpwuid(uid) : NULL;
+	struct group *wheel = getgrnam("wheel");
+	gid_t groups[64];
+	int n = 64;
+
+	if (uid == 0)
+		return true;
+	if (pw == NULL || wheel == NULL ||
+	    getgrouplist(pw->pw_name, pw->pw_gid, groups, &n) < 0)
+		return false;
+	for (int i = 0; i < n; i++)
+		if (groups[i] == wheel->gr_gid)
+			return true;
+	return false;
+}
+
+static void dismiss(const char *marker)
+{
+	const char *name = marker + strlen(".dismiss-");
+	char path[600], mpath[600];
+	struct stat st;
+
+	snprintf(mpath, sizeof(mpath), "%s/%s", notifydir, marker);
+	if (lstat(mpath, &st) == 0 && S_ISREG(st.st_mode) && may_dismiss(st.st_uid) &&
+	    name[0] && name[0] != '.' && !strchr(name, '/')) {
+		snprintf(path, sizeof(path), "%s/%s", notifydir, name);
+		if (unlink(path) == 0)
+			dbg("dismissed %s (uid %u)\n", name, (unsigned)st.st_uid);
+	}
+	unlink(mpath);
+}
+
 int main(int argc, char **argv)
 {
 	struct sigaction sa = { 0 };
@@ -275,6 +318,10 @@ int main(int argc, char **argv)
 			int steps[MAX_STEPS], n;
 
 			p += sizeof(*ev) + ev->len;
+			if (ev->len && strncmp(ev->name, ".dismiss-", 9) == 0) {
+				dismiss(ev->name);
+				continue;
+			}
 			if (!ev->len || ev->name[0] == '.')
 				continue;	/* s22-notify's temporary file */
 			snprintf(path, sizeof(path), "%s/%s", notifydir, ev->name);

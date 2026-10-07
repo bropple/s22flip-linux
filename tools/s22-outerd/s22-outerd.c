@@ -21,11 +21,12 @@
  * its modification time changes, and on SIGHUP. Without one the background
  * is a dark gradient.
  *
- * Settings: SETTINGS (default /var/lib/s22-outer/settings), "key=value"
- * lines, re-read whenever the file changes:
+ * Settings: SETTINGS (default /var/lib/s22/settings, shared with the GUI
+ * and set in its Settings app), "key=value" lines, re-read whenever the
+ * file changes:
  *   clock=12|24      12-hour clock with AM/PM (default), or 24-hour
  *   blink=yes|no     the colon blinks once a second (default yes)
- *   timeout=SECONDS  how long the screen stays lit (default: -t, 10 s)
+ *   timeout=SECONDS  how long the outer screen stays lit (default: -t, 10 s)
  *
  * Notifications: one file per notification in NOTIFYDIR (default
  * /run/s22-notify, world-writable and sticky); the newest is shown on one
@@ -73,7 +74,7 @@ static const char *bl_name = "ext-backlight";
 static int show_ms = 10000;
 static const char *wallpaper = "/var/lib/s22-outer/wallpaper.ppm";
 static const char *notifydir = "/run/s22-notify";
-static const char *settings = "/var/lib/s22-outer/settings";
+static const char *settings = "/var/lib/s22/settings";
 static const char *hookdir = "/etc/s22-outerd.d";
 static bool verbose;
 
@@ -885,8 +886,17 @@ int main(int argc, char **argv)
 		/* Show or hide */
 		if (show_until > t && lid_closed) {
 			if (!lit) {
-				panel_on();
+				/*
+				 * The current frame first: the panel lights only once
+				 * the frame the enable sends is in, and the enable
+				 * sends the DRM buffer, which fbdev's damage worker
+				 * fills from what we write. Unblanking at once would
+				 * block that worker for the whole panel init (~0.4 s)
+				 * and the old frame would go out; give it time first.
+				 */
 				draw();
+				usleep(20000);
+				panel_on();
 				backlight(true);
 			}
 			timeout = (int)(show_until - t);

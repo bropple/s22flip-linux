@@ -46,7 +46,7 @@ more than GUARD_PKTS packets pass in GUARD_S seconds.
 
   s22-imsd [-v] [-P LLIFACE | -Q]
 """
-import ipaddress, signal, socket, struct, subprocess, sys, time
+import ipaddress, os, signal, socket, struct, subprocess, sys, time
 
 AF_QIPCRTR, PORT_CTRL, NEW_SERVER = 42, 0xFFFFFFFE, 4
 SERVICE, VERSION, INSTANCE = 770, 1, 0
@@ -66,6 +66,16 @@ if QMAP:
 GUARD_S, GUARD_PKTS = 2, 2000
 LINK_ADDR = 0x23
 CHAIN = "s22_ims"
+STATE = "/run/s22-imsd.state"     # "up" or "down", for the GUI
+
+
+def set_state(v):
+    try:
+        with open(STATE + ".new", "w") as f:
+            f.write(v + "\n")
+        os.replace(STATE + ".new", STATE)
+    except OSError:
+        pass
 
 
 def log(*a):
@@ -318,6 +328,7 @@ def main():
             addr = str(ipaddress.IPv4Address(s.get_ipv4_address()))
         st["addr"], st["family"] = addr, family
         log("IMS PDN up (profile %d)" % profile)
+        set_state("up")
         link_local_up()
         return addr
 
@@ -331,6 +342,7 @@ def main():
             except GLib.Error as e:
                 log("stop: %s" % e.message)
         proxy_off()
+        set_state("down")
         st["handle"] = st["addr"] = None
 
     def still_up():

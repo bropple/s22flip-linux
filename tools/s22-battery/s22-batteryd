@@ -24,7 +24,15 @@ this keeps its own reported capacity on top: while discharging it only
 falls, at most FALL_PM %/min, toward the driver's value; while charging it
 only rises, at most RISE_PM %/min (about 600 mA of real charge), and goes
 to 100 when the charger reports full; a fresh hardware OCV reading (taken
-by the PMIC when the current is low) is a stronger target. It is kept
+by the PMIC when the current is low) is a stronger target.
+
+While discharging the target is also our own OCV estimate, and the lower of
+it and the driver's value wins: the driver's OCV moves at most 25 mV per
+measurement, so the drop when the charger is unplugged (100 mV or more) is
+lost and it reports 100% long after a charge. Ours is the highest battery
+voltage of the last OCV_WINDOW_S seconds (the lightest load, so load spikes
+from the camera or the modem do not count) plus LOAD_UV for the idle load,
+looked up in the battery's OCV table. It is kept
 across reboots and published in /run/s22-battery/capacity, used by the
 power-off check and the outer display, and logged next to the driver's.
 
@@ -46,6 +54,8 @@ OUT = "/run/s22-battery"
 FALL_PM = 1.0
 RISE_PM = 0.5
 OCV_TABLE = "/proc/device-tree/battery/ocv-capacity-table-0"
+OCV_WINDOW_S = 300
+LOAD_UV = 20000
 
 verbose = False
 def log(*a): print("s22-batteryd:", *a, file=sys.stderr, flush=True)
@@ -137,16 +147,33 @@ class Gauge:
     def __init__(self):
         self.table = ocv_table()
         self.soc = None
+        self.vbat = []          # (monotonic s, uV) while discharging
         try:
             self.soc = min(100.0, max(0.0, float(read(STATE).split()[0])))
             log("capacity %.1f%% from the last run" % self.soc)
         except (ValueError, IndexError):
             pass
 
+    def estimate(self):
+        """capacity from our OCV estimate, or None (see the top)"""
+        now = time.monotonic()
+        uv = num(BAT + "/voltage_now")
+        if uv > 0:
+            self.vbat.append((now, uv))
+        self.vbat = [(t, v) for t, v in self.vbat if now - t <= OCV_WINDOW_S]
+        if not self.vbat:
+            return None
+        return ocv2cap(max(v for _, v in self.vbat) + LOAD_UV, self.table)
+
     def update(self, minutes):
         drv = num(BAT + "/capacity")
         ocv = num(BAT + "/voltage_ocv")
         hw = ocv2cap(ocv, self.table) if ocv > 0 else None
+        est = None
+        if discharging():
+            est = self.estimate()
+        else:
+            self.vbat = []      # charging voltages are no OCV
         if self.soc is None:
             self.soc = float(hw if hw is not None else max(drv, 0))
         if not discharging():
@@ -155,6 +182,8 @@ class Gauge:
                 self.soc += min(goal - self.soc, RISE_PM * minutes)
         else:
             goal = hw if hw is not None else drv
+            if hw is None and est is not None and (drv < 0 or est < drv):
+                goal = est
             if goal < self.soc:
                 self.soc -= min(self.soc - goal, FALL_PM * minutes)
             elif hw is not None and goal > self.soc + 3:

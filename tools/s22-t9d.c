@@ -20,6 +20,13 @@
  * armed the character is held back and sent with Ctrl when it is final.
  * The current mode is written to OUTDIR/mode (default /run/s22-t9).
  *
+ * Under the GUI (the console in front is in KD_GRAPHICS) the compositor
+ * picks how the keypad behaves for the window in front by writing to
+ * OUTDIR/gui (group wheel may write): "raw" passes every key through
+ * unchanged, for apps that do their own text entry; "text" (the default)
+ * types as above, for programs that only know a keyboard, except that Home
+ * stays Home (the compositor goes home) and only held is it Tab.
+ *
  * On a text console an indicator in the top-right corner shows the mode and,
  * while a key is being tapped, its characters with the current one
  * highlighted. At a password prompt (no echo, line mode) it also
@@ -35,6 +42,7 @@
  *           [-b BACKLIGHT_MS] [-B LED]
  */
 #include <dirent.h>
+#include <grp.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -72,6 +80,7 @@ static const char symbols[] = "*+=@#$%&|~`^\\()[]{}<>";
 
 static int ufd;
 static int vt = -1;		/* /dev/tty0, the console in front, for the indicator */
+static int kd = -1;		/* /dev/tty0 again, for its mode, even with -q */
 static bool dirty;		/* the indicator needs redrawing */
 static int typed_on_line;	/* characters typed since the last Enter */
 static bool verbose;		/* -v: log every input event and action */
@@ -409,6 +418,48 @@ static unsigned short passthrough(unsigned short code)
 	}
 }
 
+/* What is in front: the console, or the GUI wanting text or raw keys */
+enum front { F_CONSOLE, F_GUI_TEXT, F_GUI_RAW };
+
+static enum front front(void)
+{
+	char path[256], buf[8] = "";
+	int m, fd;
+
+	if (kd < 0 || ioctl(kd, KDGETMODE, &m) != 0 || m != KD_GRAPHICS)
+		return F_CONSOLE;
+	snprintf(path, sizeof(path), "%s/gui", outdir);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return F_GUI_TEXT;
+	if (read(fd, buf, sizeof(buf) - 1) < 0)
+		buf[0] = 0;
+	close(fd);
+	return strncmp(buf, "raw", 3) == 0 ? F_GUI_RAW : F_GUI_TEXT;
+}
+
+/* Home under the GUI's text mode: Home when tapped, Tab when held */
+static bool home_held, home_done;
+static long long home_since;
+
+static void gui_init(void)
+{
+	char path[256];
+	struct group *g = getgrnam("wheel");
+	FILE *f;
+
+	snprintf(path, sizeof(path), "%s/gui", outdir);
+	f = fopen(path, "w");
+	if (!f)
+		return;
+	fputs("text\n", f);
+	fclose(f);
+	if (g && chown(path, 0, g->gr_gid) == 0)
+		chmod(path, 0664);
+}
+
+static unsigned char raw_down[KEY_MAX / 8 + 1];	/* pressed in raw mode */
+
 static bool is_tap_key(unsigned short code)
 {
 	return (code >= KEY_1 && code <= KEY_0) || code == KEY_NUMERIC_STAR;
@@ -417,8 +468,41 @@ static bool is_tap_key(unsigned short code)
 static void key_event(unsigned short code, int value)
 {
 	dbg("key %u %d (held %d, pending %d)\n", code, value, held_key, pend.key);
+	/* A key pressed in raw mode is released in raw mode */
+	enum front f = value == 1 ? front() : F_CONSOLE;
+	if (f == F_GUI_RAW) {
+		commit();
+		held_key = 0;
+		raw_down[code / 8] |= 1 << (code % 8);
+	}
+	if (BIT(raw_down, code)) {
+		if (value == 0)
+			raw_down[code / 8] &= ~(1 << (code % 8));
+		if (value != 2) {
+			emit(EV_KEY, code, value);
+			syn();
+		}
+		return;
+	}
 	if (value != 2)
 		dirty = true;
+	if (code == KEY_HOMEPAGE && (f == F_GUI_TEXT || home_held)) {
+		if (value == 1) {
+			commit();
+			home_held = true;
+			home_done = false;
+			home_since = now_ms();
+		} else if (value == 0) {
+			home_held = false;
+			if (!home_done) {
+				emit(EV_KEY, KEY_HOMEPAGE, 1);
+				syn();
+				emit(EV_KEY, KEY_HOMEPAGE, 0);
+				syn();
+			}
+		}
+		return;
+	}
 	if (code == KEY_NUMERIC_POUND) {
 		if (value == 1) {
 			commit();
@@ -522,6 +606,10 @@ static void timers(void)
 		hold(held_key);
 		held_done = true;
 	}
+	if (home_held && !home_done && t - home_since >= hold_ms) {
+		tap_key(KEY_TAB, false, false);
+		home_done = true;
+	}
 	if (pend.key && t >= pend.until) {
 		commit();
 		dirty = true;
@@ -542,6 +630,8 @@ static int next_timeout(void)
 
 	if (held_key && !held_done)
 		next = held_since + hold_ms;
+	if (home_held && !home_done && (next < 0 || home_since + hold_ms < next))
+		next = home_since + hold_ms;
 	if (pend.key && (next < 0 || pend.until < next))
 		next = pend.until;
 	if (ind_len && (next < 0 || ind_clear_at < next))
@@ -659,8 +749,10 @@ int main(int argc, char **argv)
 	}
 	if (!quiet)
 		vt = open("/dev/tty0", O_WRONLY | O_NOCTTY | O_CLOEXEC);
+	kd = open("/dev/tty0", O_WRONLY | O_NOCTTY | O_CLOEXEC);
 	mkdir(outdir, 0755);
 	write_mode();
+	gui_init();
 	backlight_open();
 	signal(SIGTERM, on_signal);
 	signal(SIGINT, on_signal);
