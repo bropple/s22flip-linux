@@ -36,11 +36,10 @@
  * -a/-p/-l/-b keep a sensor on at that report rate (Hz) with no client;
  * the default is 0 for all, sensors on demand only.
  *
- * When the sensor manager first appears, every sensor runs for PULSE
- * seconds (-i, default 5; 0 = off), then only on demand. Without a sensor
- * start after boot, the first transfer on the outer display's SPI bus
- * (BLSP2 QUP2) times out and the controller stays wedged until it is
- * reset; what the ADSP's sensor start provides is not known yet. Registry
+ * -i PULSE runs every sensor for PULSE seconds when the sensor manager
+ * first appears (default 0, off). It was a stopgap for the outer display's
+ * SPI bus: the ADSP parks GPIO 22/23 as GPIOs while its sensors are idle,
+ * which the kernel's SPI driver now undoes before every transfer. Registry
  * data: the
  * phone's own /persist/sensors/sns.reg, and a group table extracted from
  * the phone's own sensors.qti with sns-reg-groups.py. The protocol was
@@ -141,7 +140,7 @@ struct client {
 static struct client clients[MAX_CLIENTS];
 
 /* Boot pulse (see the top) */
-static unsigned int pulse_s = 5;
+static unsigned int pulse_s;
 static long long pulse_until;	/* ms, CLOCK_MONOTONIC; 0 = not running */
 static int pulsed;
 
