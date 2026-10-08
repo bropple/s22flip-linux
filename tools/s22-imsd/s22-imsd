@@ -48,7 +48,7 @@ more than GUARD_PKTS packets pass in GUARD_S seconds.
 """
 import ipaddress, os, signal, socket, struct, subprocess, sys, time
 
-AF_QIPCRTR, PORT_CTRL, NEW_SERVER = 42, 0xFFFFFFFE, 4
+AF_QIPCRTR, PORT_CTRL, NEW_SERVER, DEL_SERVER = 42, 0xFFFFFFFE, 4, 5
 SERVICE, VERSION, INSTANCE = 770, 1, 0
 REQ, RSP, IND = 0, 2, 4
 PDP_ACTIVATE, PDP_DEACTIVATE = 0x20, 0x21
@@ -361,10 +361,24 @@ def main():
     sock = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM)
     sock.bind((1, 0))
     lnode, lport = sock.getsockname()
-    sock.sendto(struct.pack("<5I", NEW_SERVER, SERVICE,
-                            (VERSION & 0xFF) | (INSTANCE << 8), lnode, lport),
-                (lnode, PORT_CTRL))
+
+    def announce(cmd):
+        sock.sendto(struct.pack("<5I", cmd, SERVICE,
+                                (VERSION & 0xFF) | (INSTANCE << 8), lnode, lport),
+                    (lnode, PORT_CTRL))
+
+    announce(NEW_SERVER)
     log("hosting IMS data service %d on %d:%d" % (SERVICE, lnode, lport))
+
+    def reannounce(*_):
+        """SIGHUP (s22-celld, when service comes back after a loss): offer
+        the service again; the modem's IMS asks for its PDN only when the
+        service appears, which a restart of this daemon used to do."""
+        log("offering the IMS data service again")
+        tear_down()
+        announce(DEL_SERVER)
+        announce(NEW_SERVER)
+        return True
 
     def send(addr, typ, txn, mid, body):
         sock.sendto(struct.pack("<BHHH", typ, txn, mid, len(body)) + body, addr)
@@ -445,6 +459,7 @@ def main():
         add_signal = GLib.unix_signal_add
     add_signal(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop)
     add_signal(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop)
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGHUP, reannounce)
     dev.connect("device-removed", removed)
     try:
         loop.run()

@@ -305,8 +305,12 @@ def deliver(msg):
     dbg("from %s archived" % msg["sender"])
 
 
-def record_sent(number, text):
-    line = "%s\t%s\t%s\n" % (now_iso(), escape(number), escape(text))
+def record_sent(number, text, unconfirmed=False):
+    """TIME NUMBER TEXT, and a fourth field "unconfirmed" when the modem's
+    answer never came: the message may well have gone out (it did when the
+    network dropped the phone right after), so it is kept, marked."""
+    line = "%s\t%s\t%s%s\n" % (now_iso(), escape(number), escape(text),
+                               "\tunconfirmed" if unconfirmed else "")
     append(SENT, line)
 
 
@@ -549,10 +553,17 @@ def main_loop(set_online):
             try:
                 out = req(wms, "raw_send", inp, 60)
             except GLib.Error as e:
+                if e.matches(Qmi.core_error_quark(), Qmi.CoreError.TIMEOUT):
+                    # Handed to the modem, answer lost: maybe sent
+                    record_sent(number, text, unconfirmed=True)
+                    log("sent a message, unconfirmed (part %d of %d: %s)"
+                        % (i + 1, len(pdus), e.message))
+                    return "unconfirmed"
                 raise ValueError("part %d of %d: %s" % (i + 1, len(pdus), e.message))
             dbg("part %d/%d: message id %d" % (i + 1, len(pdus), out.get_message_id()))
         record_sent(number, text)
         log("sent a message (%d part%s)" % (len(pdus), "" if len(pdus) == 1 else "s"))
+        return ""
 
     def serve(conn):
         try:
@@ -564,8 +575,8 @@ def main_loop(set_online):
                 reply = "error bad request"
             else:
                 try:
-                    send(number, unescape(text))
-                    reply = "ok"
+                    note = send(number, unescape(text))
+                    reply = ("ok " + note).strip()
                 except ValueError as e:
                     reply = "error %s" % e
                     log("send failed: %s" % e)

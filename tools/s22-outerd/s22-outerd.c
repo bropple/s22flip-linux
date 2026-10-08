@@ -412,13 +412,35 @@ static void wifi_icon(int x0, int y0, int lit)
 				pixel(x0 + x, y0 + y, wifi_px[y][x] - '0' < lit ? WHITE : GREY);
 }
 
-/* Signal bars (0-4), kept for the cellular signal */
-static void __attribute__((unused)) signal_bars(int x0, int bars)
+/* Cellular signal bars (0-4) */
+static void signal_bars(int x0, int bars)
 {
 	int i;
 
 	for (i = 0; i < 4; i++)
 		rect(x0 + i * 4, 14 - 3 * (i + 1), 3, 3 * (i + 1), i < bars ? WHITE : GREY);
+}
+
+/*
+ * Cellular bars from s22-celld's state: 0-4 when registered, 0 (all grey)
+ * in limited or no service, -1 without s22-celld (no bars drawn).
+ */
+static int cell_bars(void)
+{
+	char line[64];
+	int bars = 0;
+	bool full = false;
+	FILE *f = fopen("/run/s22-cell/state", "re");
+
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f)) {
+		if (!strcmp(line, "service=full\n"))
+			full = true;
+		sscanf(line, "bars=%d", &bars);
+	}
+	fclose(f);
+	return full ? bars : 0;
 }
 
 static const char *bt_rune[] = {
@@ -638,11 +660,14 @@ static void draw(void)
 	bars = wifi_bars();	/* all grey when not connected */
 	if (bars >= -1)
 		wifi_icon(2, 3, bars > 0 ? bars : 0);	/* bars 1-4: dot + arcs */
+	bars = cell_bars();
+	if (bars >= 0)
+		signal_bars(20, bars);
 	if (bt_connected())
 		for (i = 0; i < 11; i++)
 			for (x = 0; x < 7; x++)
 				if (bt_rune[i][x] == '#')
-					pixel(22 + x, 3 + i, BLUE);
+					pixel(40 + x, 3 + i, BLUE);
 	cap = battery(&charging);
 	if (cap >= 0) {
 		rect(103, 4, 20, 10, WHITE);		/* outline */

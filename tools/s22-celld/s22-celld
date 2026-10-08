@@ -1,0 +1,258 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-celld: cellular status for the screens, and a registration watchdog.
+
+Follows the modem's registration and signal through QMI NAS indications
+(no polling: the modem reports a change of serving system, and signal
+changes across the bar thresholds) and keeps STATE up to date, key=value
+lines for the status bars:
+
+  service=full|limited|none   registered / emergency only / no network
+  tech=lte|umts|gsm|...       radio in use ("" without service)
+  bars=0..4                   from LTE RSRP or the RSSI otherwise
+  operator=NAME               the network's name, or MCCMNC
+
+Watchdog: after a network drop the modem was seen to stay camped on another
+operator's cell in limited (emergency only) service although its own
+network was back, until the radio was cycled. If service stays short of
+full for STUCK_S, the radio is cycled (low power, then online: a new
+search and attach, ordinary phone behaviour), at most once per RETRY_S.
+When service comes back after a loss, s22-imsd gets SIGHUP so it offers
+the IMS data service to the modem again (the modem's IMS does not ask for
+its PDN again otherwise).
+
+  s22-celld [-v]
+"""
+import os, signal, sys, time
+
+STATE_DIR = "/run/s22-cell"
+STATE = STATE_DIR + "/state"
+STUCK_S = 300
+RETRY_S = 900
+CYCLE_PAUSE_S = 5
+RSRP_BARS = [-115, -105, -95, -85]      # dBm, LTE
+RSSI_BARS = [-107, -101, -95, -89]      # dBm, GSM/UMTS
+IMSD = "/usr/bin/s22-imsd"
+verbose = "-v" in sys.argv[1:]
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), "s22-celld:", *a, file=sys.stderr, flush=True)
+
+
+def dbg(*a):
+    if verbose:
+        log(*a)
+
+
+def bars(value, thresholds):
+    return sum(1 for t in thresholds if value >= t)
+
+
+def write_state(st):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    text = "service=%s\ntech=%s\nbars=%d\noperator=%s\n" % (
+        st["service"], st["tech"], st["bars"] if st["service"] != "none" else 0,
+        st["operator"])
+    try:
+        with open(STATE + ".new", "w") as f:
+            f.write(text)
+        os.replace(STATE + ".new", STATE)
+    except OSError as e:
+        log("state: %s" % e)
+
+
+def imsd_pids():
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if IMSD.encode() in argv[:2]:
+            yield int(pid)
+
+
+def main():
+    import gi
+    gi.require_version("Qmi", "1.0")
+    gi.require_version("Qrtr", "1.0")
+    from gi.repository import GLib, Qmi, Qrtr
+
+    ctx = GLib.MainContext.default()
+
+    def wait(start, finish):
+        box = []
+        start(lambda _s, res, *_: box.append(res))
+        while not box:
+            ctx.iteration(True)
+        return finish(box[0])
+
+    def req(client, name, inp, timeout=30):
+        out = wait(lambda cb: getattr(client, name)(inp, timeout, None, cb),
+                   getattr(client, name + "_finish"))
+        out.get_result()
+        return out
+
+    bus = wait(lambda cb: Qrtr.Bus.new(1000, None, cb), Qrtr.Bus.new_finish)
+    while True:
+        try:
+            node = wait(lambda cb: bus.wait_for_node(0, 30000, None, cb),
+                        bus.wait_for_node_finish)
+            break
+        except GLib.Error:
+            dbg("waiting for the modem")
+    dev = wait(lambda cb: Qmi.Device.new_from_node(node, None, cb),
+               Qmi.Device.new_from_node_finish)
+    wait(lambda cb: dev.open(Qmi.DeviceOpenFlags(0), 15, None, cb),
+         dev.open_finish)
+
+    def client(service):
+        return wait(lambda cb: dev.allocate_client(service, 0, 10, None, cb),
+                    dev.allocate_client_finish)
+
+    nas = client(Qmi.Service.NAS)
+    dms = client(Qmi.Service.DMS)
+    st = {"service": "none", "tech": "", "bars": 0, "operator": "",
+          "short_since": time.monotonic(), "lost": False, "last_cycle": -RETRY_S,
+          "timer": 0}
+
+    def arm_watchdog():
+        if not st["timer"]:
+            st["timer"] = GLib.timeout_add_seconds(STUCK_S, watchdog)
+
+    def disarm_watchdog():
+        if st["timer"]:
+            GLib.source_remove(st["timer"])
+            st["timer"] = 0
+
+    def cycle_radio():
+        log("service short of full for %d s; cycling the radio" % STUCK_S)
+        st["last_cycle"] = time.monotonic()
+        try:
+            for mode in (Qmi.DmsOperatingMode.LOW_POWER, Qmi.DmsOperatingMode.ONLINE):
+                i = Qmi.MessageDmsSetOperatingModeInput()
+                i.set_mode(mode)
+                req(dms, "set_operating_mode", i)
+                if mode == Qmi.DmsOperatingMode.LOW_POWER:
+                    time.sleep(CYCLE_PAUSE_S)
+        except GLib.Error as e:
+            log("radio cycle: %s" % e.message)
+
+    def watchdog():
+        st["timer"] = 0
+        if st["service"] == "full":
+            return False
+        if time.monotonic() - st["last_cycle"] >= RETRY_S:
+            cycle_radio()
+        arm_watchdog()                  # look again after another STUCK_S
+        return False
+
+    def set_service(service, tech, operator):
+        was = st["service"]
+        st["service"], st["tech"], st["operator"] = service, tech, operator
+        if service != was:
+            log("service %s%s%s" % (service, " (%s)" % tech if tech else "",
+                                    ", %s" % operator if operator else ""))
+        if service == "full":
+            disarm_watchdog()
+            if st["lost"]:
+                st["lost"] = False
+                for pid in imsd_pids():
+                    log("service back: asking s22-imsd (%d) to offer IMS again" % pid)
+                    os.kill(pid, signal.SIGHUP)
+        else:
+            if was == "full" or not st["lost"]:
+                st["short_since"] = time.monotonic()
+            st["lost"] = True
+            arm_watchdog()
+        write_state(st)
+
+    def on_serving(out):
+        try:
+            ss = out.get_serving_system()
+        except GLib.Error:
+            return
+        reg = ss[0]
+        radios = list(ss[4]) if len(ss) > 4 and ss[4] else []
+        tech = radios[0].value_nick if radios else ""
+        operator = ""
+        try:
+            plmn = out.get_current_plmn()
+            operator = plmn[2] or "%03d%02d" % (plmn[0], plmn[1])
+        except (GLib.Error, IndexError, TypeError):
+            pass
+        if reg == Qmi.NasRegistrationState.REGISTERED:
+            service = "full"
+        else:
+            service = "none"
+            try:
+                if out.get_detailed_service_status()[0] == Qmi.NasServiceStatus.LIMITED:
+                    service = "limited"
+            except GLib.Error:
+                pass
+            if service == "none" and radios:
+                service = "limited"     # camped somewhere, not registered
+        set_service(service, tech if service != "none" else "", operator)
+
+    def on_signal(out):
+        b = None
+        try:
+            b = bars(out.get_lte_signal_strength()[2], RSRP_BARS)
+        except GLib.Error:
+            for name in ("get_wcdma_signal_strength", "get_gsm_signal_strength"):
+                try:
+                    b = bars(getattr(out, name)()[0], RSSI_BARS)
+                    break
+                except GLib.Error:
+                    continue
+        if b is not None and b != st["bars"]:
+            st["bars"] = b
+            dbg("signal %d bars" % b)
+            write_state(st)
+
+    i = Qmi.MessageNasRegisterIndicationsInput()
+    i.set_serving_system_events(True)
+    i.set_signal_info(True)
+    try:
+        req(nas, "register_indications", i)
+    except GLib.Error as e:
+        log("register indications: %s" % e.message)
+    c = Qmi.MessageNasConfigSignalInfoInput()
+    c.set_rsrp_threshold(RSRP_BARS)
+    c.set_rssi_threshold(RSSI_BARS)
+    try:
+        req(nas, "config_signal_info", c)
+    except GLib.Error as e:
+        log("signal thresholds: %s" % e.message)
+
+    nas.connect("serving-system", lambda _c, out: on_serving(out))
+    nas.connect("signal-info", lambda _c, out: on_signal(out))
+    try:
+        on_serving(req(nas, "get_serving_system", None))
+    except GLib.Error as e:
+        log("serving system: %s" % e.message)
+    try:
+        on_signal(req(nas, "get_signal_info", None))
+    except GLib.Error as e:
+        dbg("signal info: %s" % e.message)
+    log("ready")
+
+    loop = GLib.MainLoop()
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except (ImportError, ValueError):
+        add_signal = GLib.unix_signal_add
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda *_: loop.quit() or False)
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda *_: loop.quit() or False)
+    dev.connect("device-removed", lambda *_: (log("modem went away; exiting"), loop.quit()))
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
