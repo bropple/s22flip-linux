@@ -14,9 +14,20 @@
  *   alarm=none              no vibration for this source
  *   strength=100            percent, for every pattern
  *
- * Without the file, every source gets 200,150,200. Alerts closer together
+ * Without the file, every source gets 200,150,200. The phone's settings
+ * come first: none with vibrate=off; the text vibration of the
+ * contact it is from (X-S22-TEXTVIB); vib_SOURCE ("none", "default" or a
+ * pattern); vib_notify; then the file. Their strength is vib_strength
+ * (1-15), else the file's. Alerts closer together
  * than one second are merged. Display is someone else's job (s22-outerd,
  * and s22-shell in the GUI).
+ *
+ * Each alert also plays a sound (s22-play, at the ring and notification
+ * volume), chosen from the phone's settings (SETTINGS): none with
+ * sounds=off or during a call; the text tone of the contact it is from
+ * ("from=" in the notification; X-S22-TEXTTONE in CONTACTS); else
+ * sound_SOURCE (a file, "silent" or "default"); else notify_sound, else
+ * DEFAULT_SOUND. A ringing call ("call") gets none: s22-calld rings.
  *
  * Dismissing: the directory is sticky, so only a notification's owner (or
  * root) may delete it. Anyone else in group wheel asks by creating
@@ -37,6 +48,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -49,6 +61,11 @@
 static const char *notifydir = "/run/s22-notify";
 static const char *patterns = "/var/lib/s22-notify/vibrate";
 static const char *vibdev;
+
+#define SETTINGS	"/var/lib/s22/settings"
+#define CONTACTS	"/var/lib/s22/contacts.vcf"
+#define CALL_STATE	"/run/s22-call/state"
+#define DEFAULT_SOUND	"/usr/share/sounds/aosp/notifications/pixiedust.ogg"
 static bool verbose;
 
 #define dbg(...) do { if (verbose) fprintf(stderr, __VA_ARGS__); } while (0)
@@ -177,23 +194,11 @@ static void load_patterns(void)
 	dbg("%d patterns, strength %d\n", npatterns, strength);
 }
 
-/* The steps for a source: its own line, else "default", else 200,150,200 */
-static int pattern_for(const char *source, int *steps)
+/* on,off,on,... into steps; "none" is none */
+static int parse_steps(const char *p, int *steps)
 {
-	const char *def = NULL, *mine = NULL, *p;
-	size_t len = strlen(source);
-	int i, n = 0;
+	int n = 0;
 
-	load_patterns();
-	for (i = 0; i < npatterns; i++) {
-		char *l = pattern_lines[i];
-
-		if (!strncmp(l, source, len) && (l[len] == '=' || l[len] == ' '))
-			mine = strchr(l, '=') + 1;
-		else if (!strncmp(l, "default", 7) && (l[7] == '=' || l[7] == ' '))
-			def = strchr(l, '=') + 1;
-	}
-	p = mine ? mine : def ? def : "200,150,200";
 	while (*p == ' ')
 		p++;
 	if (!strncmp(p, "none", 4))
@@ -207,6 +212,26 @@ static int pattern_for(const char *source, int *steps)
 			p++;
 	}
 	return n;
+}
+
+/* The steps for a source: its own line, else "default", else 200,150,200 */
+static int pattern_for(const char *source, int *steps)
+{
+	const char *def = NULL, *mine = NULL, *p;
+	size_t len = strlen(source);
+	int i;
+
+	load_patterns();
+	for (i = 0; i < npatterns; i++) {
+		char *l = pattern_lines[i];
+
+		if (!strncmp(l, source, len) && (l[len] == '=' || l[len] == ' '))
+			mine = strchr(l, '=') + 1;
+		else if (!strncmp(l, "default", 7) && (l[7] == '=' || l[7] == ' '))
+			def = strchr(l, '=') + 1;
+	}
+	p = mine ? mine : def ? def : "200,150,200";
+	return parse_steps(p, steps);
 }
 
 /* --------------------------------------------------------------- main --- */
@@ -227,6 +252,172 @@ static void source_of(const char *path, char *src, size_t len)
 			break;
 		}
 	fclose(f);
+}
+
+/* "key=value" from a file; false if not there */
+static bool file_value(const char *path, const char *key, char *buf, size_t len)
+{
+	char line[512];
+	size_t kl = strlen(key);
+	bool found = false;
+	FILE *f = fopen(path, "re");
+
+	buf[0] = 0;
+	while (f && fgets(line, sizeof(line), f))
+		if (!strncmp(line, key, kl) && line[kl] == '=') {
+			line[strcspn(line, "\r\n")] = 0;
+			snprintf(buf, len, "%s", line + kl + 1);
+			found = true;
+		}
+	if (f)
+		fclose(f);
+	return found;
+}
+
+static bool in_call(void)
+{
+	char line[128];
+	bool call = false;
+	FILE *f = fopen(CALL_STATE, "re");
+
+	while (f && fgets(line, sizeof(line), f))
+		if (!strncmp(line, "call ", 5))
+			call = true;
+	if (f)
+		fclose(f);
+	return call;
+}
+
+/* The last ten digits, the national number (all if fewer than seven) */
+static void tail_digits(const char *num, char *out, size_t len)
+{
+	char d[48];
+	size_t n = 0;
+
+	for (; *num && n < sizeof(d) - 1; num++)
+		if (*num >= '0' && *num <= '9')
+			d[n++] = *num;
+	d[n] = 0;
+	snprintf(out, len, "%s", n > 10 ? d + n - 10 : d);
+}
+
+/* A contact's FIELD (X-S22-TEXTTONE) for the number it is from, or "" */
+static void contact_field(const char *number, const char *field, char *buf, size_t len)
+{
+	char line[512], want[16], have[16], val[256] = "";
+	bool match = false;
+	size_t fl = strlen(field);
+	FILE *f;
+
+	buf[0] = 0;
+	tail_digits(number, want, sizeof(want));
+	if (strlen(want) < 3 || !(f = fopen(CONTACTS, "re")))
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		char *key = line, *colon = strchr(line, ':');
+		line[strcspn(line, "\r\n")] = 0;
+		if (!colon)
+			continue;
+		*colon = 0;
+		if (strchr(key, '.') && strchr(key, '.') < key + strcspn(key, ";"))
+			key = strchr(key, '.') + 1;
+		if (!strcasecmp(key, "BEGIN")) {
+			match = false;
+			val[0] = 0;
+		} else if (!strncasecmp(key, "TEL", 3)) {
+			tail_digits(colon + 1, have, sizeof(have));
+			if (!strcmp(have, want))
+				match = true;
+		} else if (!strncasecmp(key, field, fl) && (!key[fl] || key[fl] == ';')) {
+			snprintf(val, sizeof(val), "%s", colon + 1);
+		} else if (!strcasecmp(key, "END") && match && val[0]) {
+			snprintf(buf, len, "%s", val);
+			break;
+		}
+	}
+	fclose(f);
+}
+
+/* The sound for a notification, or false for none */
+static bool sound_for(const char *path, const char *src, char *file, size_t len)
+{
+	char v[256], from[48], key[96];
+
+	if (file_value(SETTINGS, "sounds", v, sizeof(v)) && !strcmp(v, "off"))
+		return false;
+	if (!strcmp(src, "call") || in_call())
+		return false;
+	if (file_value(path, "from", from, sizeof(from)) && from[0]) {
+		contact_field(from, "X-S22-TEXTTONE", v, sizeof(v));
+		if (!strcmp(v, "silent"))
+			return false;
+		if (v[0] == '/' && access(v, R_OK) == 0) {
+			snprintf(file, len, "%s", v);
+			return true;
+		}
+	}
+	snprintf(key, sizeof(key), "sound_%s", src);
+	if (file_value(SETTINGS, key, v, sizeof(v))) {
+		if (!strcmp(v, "silent"))
+			return false;
+		if (v[0] == '/' && access(v, R_OK) == 0) {
+			snprintf(file, len, "%s", v);
+			return true;
+		}
+	}
+	if (file_value(SETTINGS, "notify_sound", v, sizeof(v))) {
+		if (!strcmp(v, "silent"))
+			return false;
+		if (v[0] == '/' && access(v, R_OK) == 0) {
+			snprintf(file, len, "%s", v);
+			return true;
+		}
+	}
+	snprintf(file, len, "%s", DEFAULT_SOUND);
+	return access(file, R_OK) == 0;
+}
+
+/* A pattern setting: true if it decides (into steps, *n), false to go on */
+static bool vib_value(const char *v, int *steps, int *n)
+{
+	if (!v[0] || !strcmp(v, "default"))
+		return false;
+	*n = parse_steps(v, steps);
+	return true;
+}
+
+/* The vibration of a notification and its strength */
+static int vibration_for(const char *path, const char *src, int *steps, int *pct)
+{
+	char v[160], from[48], key[96];
+	int n;
+
+	*pct = strength;
+	if (file_value(SETTINGS, "vib_strength", v, sizeof(v)) && atoi(v) > 0)
+		*pct = (atoi(v) > 15 ? 15 : atoi(v)) * 100 / 15;
+	if (file_value(SETTINGS, "vibrate", v, sizeof(v)) && !strcmp(v, "off"))
+		return 0;
+	if (file_value(path, "from", from, sizeof(from)) && from[0]) {
+		contact_field(from, "X-S22-TEXTVIB", v, sizeof(v));
+		if (vib_value(v, steps, &n))
+			return n;
+	}
+	snprintf(key, sizeof(key), "vib_%s", src);
+	if (file_value(SETTINGS, key, v, sizeof(v)) && vib_value(v, steps, &n))
+		return n;
+	if (file_value(SETTINGS, "vib_notify", v, sizeof(v)) && vib_value(v, steps, &n))
+		return n;
+	return pattern_for(src, steps);
+}
+
+static void play(const char *file)
+{
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		execlp("s22-play", "s22-play", file, (char *)NULL);
+		_exit(127);
+	}
 }
 
 static volatile sig_atomic_t quit;
@@ -300,6 +491,10 @@ int main(int argc, char **argv)
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
+	/* The sound players reap themselves */
+	struct sigaction chld = { .sa_handler = SIG_IGN, .sa_flags = SA_NOCLDWAIT };
+	sigemptyset(&chld.sa_mask);
+	sigaction(SIGCHLD, &chld, NULL);
 	fprintf(stderr, "s22-notifyd: watching %s\n", notifydir);
 
 	while (!quit) {
@@ -326,11 +521,15 @@ int main(int argc, char **argv)
 				continue;	/* s22-notify's temporary file */
 			snprintf(path, sizeof(path), "%s/%s", notifydir, ev->name);
 			source_of(path, src, sizeof(src));
-			n = pattern_for(src, steps);
+			int pct;
+			n = vibration_for(path, src, steps, &pct);
 			dbg("%s: source %s, %d steps\n", ev->name, src, n);
 			if (now_ms() - last < 1000)
 				continue;	/* merge bursts */
-			vibrate(steps, n, strength);
+			char sound[256];
+			if (sound_for(path, src, sound, sizeof(sound)))
+				play(sound);
+			vibrate(steps, n, pct);
 			last = now_ms();
 		}
 	}

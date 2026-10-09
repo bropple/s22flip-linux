@@ -136,7 +136,7 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | 4× A53, RAM | Works. **CPU capped at stock's 1209.6 MHz** (960 / 1094.4 / 1209.6): this chip is fused as speed bin 2, while mainline's msm8917 table goes to 1401.6 MHz with no voltages and no CPU supply control. Our DTS overrides `cpu_opp_table` and `pll_opp_table`; the A53 PLL measures 1209600000 Hz under full load |
 | Main panel (ST7701S, DSI) | **Works with a real driver:** MSM DRM + DSI + generated `panel-cat-s22flip-st7701s`, plus Adreno 308 probing (see "Main display" below). Early boot uses lk2nd's framebuffer |
 | USB gadget (NCM + ACM), telnet | Works once the PM8916 charger module provides extcon |
-| Keypad, d-pad, soft/function keys, volume up/down, power, lid | All work. Programmable key = `KEY_NUMERIC_B`; `KEY_NUMERIC_A` (r4c4) is unidentified |
+| Keypad, d-pad, soft/function keys, volume up/down, power, lid | All work. Programmable key = `KEY_NUMERIC_B`; the speaker key (r2c0) sends `KEY_MICMUTE`; `KEY_NUMERIC_A` (r4c4) is unidentified |
 | Keypad debounce | Stock 3 ms gives double presses (domes chatter up to ~35 ms); 30 ms in our DTS |
 | Suspend (s2idle) | **Works** (4 of 4). Wakes on RTC alarm, power key, lid and keypad (volume up is also a wake source). All four cores and the CPU cluster power down while asleep. Both displays blank and come back (console on the main panel, splash on the outer one), and the USB network link reconnects by itself. Not yet checked: WiFi/modem across suspend, battery drain while asleep (needs the phone unplugged). `mem` is the same s2idle; there's no deeper state |
 | Charger (LBC) + BMS | Charging, capacity reported |

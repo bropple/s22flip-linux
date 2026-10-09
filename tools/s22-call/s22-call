@@ -1,10 +1,11 @@
 #!/bin/sh
 # s22-call: control voice calls through s22-calld.
-#   s22-call dial NUMBER | answer | hangup | status
+#   s22-call dial NUMBER | voicemail | answer | hangup | reject | dtmf DIGIT | mute on|off | status
+usage="usage: s22-call dial NUMBER | voicemail | answer | hangup | reject | dtmf DIGIT | mute on|off | status"
 case "${1:-}" in
-dial)	[ $# -eq 2 ] || { echo "usage: s22-call dial NUMBER" >&2; exit 2; } ;;
-answer|hangup|status) ;;
-*)	echo "usage: s22-call dial NUMBER | answer | hangup | status" >&2; exit 2 ;;
+dial|dtmf|mute)	[ $# -eq 2 ] || { echo "$usage" >&2; exit 2; } ;;
+answer|hangup|reject|voicemail|status) ;;
+*)	echo "$usage" >&2; exit 2 ;;
 esac
 exec python3 -c '
 import socket, sys

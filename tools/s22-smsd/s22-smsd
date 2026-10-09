@@ -296,7 +296,7 @@ def deliver(msg):
     line = "%s\t%s\t%s\n" % (msg["time"], escape(msg["sender"]),
                                escape(msg["text"]))
     append(INBOX, line)
-    link = ["-o", "sms:" + msg["sender"]] if all(
+    link = ["-o", "sms:" + msg["sender"], "-f", msg["sender"]] if all(
         c in "+0123456789" for c in msg["sender"]) and msg["sender"] else []
     r = subprocess.run(["s22-notify", "-s", "sms"] + link +
                        ["%s: %s" % (msg["sender"], msg["text"])])

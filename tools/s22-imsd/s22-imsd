@@ -54,6 +54,8 @@ REQ, RSP, IND = 0, 2, 4
 PDP_ACTIVATE, PDP_DEACTIVATE = 0x20, 0x21
 IP_V6 = 1
 CHECK_S = 60
+RECOVER_S = 10          # after a drop, offer the service again this soon,
+RETRY_S = 120           # and again this often while there is no PDN
 verbose = "-v" in sys.argv[1:]
 IFACE = "wwan0"
 PROXY = (sys.argv[sys.argv.index("-P") + 1]
@@ -309,6 +311,9 @@ def main():
             i.set_endpoint_info(BAM, 0)
             i.set_mux_id(IMS_MUX)
             req(st["wds"], "bind_mux_data_port", i)
+            # A drop shows at once (still_up() is the fallback)
+            st["wds"].connect("packet-service-status",
+                              lambda *_: GLib.idle_add(lambda: still_up() and False))
         wds = st["wds"]
         fam = Qmi.WdsIpFamily.IPV6 if family == IP_V6 else Qmi.WdsIpFamily.IPV4
         i = Qmi.MessageWdsSetIpFamilyInput()
@@ -329,6 +334,9 @@ def main():
         st["addr"], st["family"] = addr, family
         log("IMS PDN up (profile %d)" % profile)
         set_state("up")
+        if st.get("recover"):
+            GLib.source_remove(st["recover"])
+            st["recover"] = 0
         link_local_up()
         return addr
 
@@ -345,8 +353,22 @@ def main():
         set_state("down")
         st["handle"] = st["addr"] = None
 
+    def recover():
+        """No PDN since a drop or release: the modem's IMS does not ask for
+        one again by itself (calls fail meanwhile), so offer the service
+        again, and keep at it every RETRY_S until it does"""
+        st["recover"] = 0
+        if st["handle"] is None:
+            reannounce()
+            st["recover"] = GLib.timeout_add_seconds(RETRY_S, recover)
+        return False
+
+    def schedule_recover(delay=RECOVER_S):
+        if not st.get("recover"):
+            st["recover"] = GLib.timeout_add_seconds(delay, recover)
+
     def still_up():
-        """Forget the PDN if the network dropped it; the modem will ask again."""
+        """Notice when the network drops the PDN, and get it back"""
         if st["handle"] is None or st["wds"] is None:
             return True
         try:
@@ -354,6 +376,9 @@ def main():
             if out.get_connection_status() != Qmi.WdsConnectionStatus.CONNECTED:
                 log("IMS PDN dropped by the network")
                 st["handle"] = st["addr"] = None
+                proxy_off()
+                set_state("down")
+                schedule_recover()
         except GLib.Error as e:
             dbg("status: %s" % e.message)
         return True
@@ -422,6 +447,7 @@ def main():
             send(addr, RSP, txn, mid, OK + tlv(0x10, b"\xfa")
                  + tlv(0x11, t.get(0x10, u32(1))))
             tear_down()
+            schedule_recover(RETRY_S)   # it may want it back; if not, offer
         elif mid == LINK_ADDR:
             v = t.get(0x01, b"")
             i = v.find(b"fe80")

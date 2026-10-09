@@ -531,7 +531,7 @@ static int wifi_bars(void)
 }
 
 /* A Bluetooth ACL link shows up as hciN:HANDLE */
-static bool bt_connected(void)
+static bool bt_link(void)
 {
 	struct dirent *de;
 	DIR *d = opendir("/sys/class/bluetooth");
@@ -544,6 +544,105 @@ static bool bt_connected(void)
 			on = true;
 	closedir(d);
 	return on;
+}
+
+/* Digits in 3x5 pixels, drawn twice the size inside the battery */
+static const char digits3x5[10][5][4] = {
+	{ "###", "#.#", "#.#", "#.#", "###" }, { ".#.", "##.", ".#.", ".#.", "###" },
+	{ "###", "..#", "###", "#..", "###" }, { "###", "..#", "###", "..#", "###" },
+	{ "#.#", "#.#", "###", "..#", "..#" }, { "###", "#..", "###", "..#", "###" },
+	{ "###", "#..", "###", "#.#", "###" }, { "###", "..#", "..#", "..#", "..#" },
+	{ "###", "#.#", "###", "#.#", "###" }, { "###", "#.#", "###", "..#", "###" },
+};
+
+/* The battery, its charge as a fill and as a number inside it: black on
+ * the fill, white beside it */
+static void battery_icon(int cap, bool charging)
+{
+	const int bx = 96, by = 3, bw = 30, bh = 13;	/* the outline */
+	char num[8];
+	int fill = (cap * (bw - 2) + 50) / 100, n, x0, y0 = by + 2;
+
+	rect(bx, by, bw, bh, WHITE);
+	rect(bx + 1, by + 1, bw - 2, bh - 2, BLACK);
+	rect(bx + bw, by + 3, 2, bh - 6, WHITE);		/* nub */
+	rect(bx + 1, by + 1, fill, bh - 2, charging ? YELLOW : cap <= 20 ? RED : GREEN);
+	n = snprintf(num, sizeof(num), "%d", cap);
+	x0 = bx + 1 + (bw - 2 - (n * 8 - 2)) / 2;
+	for (int i = 0; i < n; i++)
+		for (int r = 0; r < 5; r++)
+			for (int col = 0; col < 3; col++) {
+				if (digits3x5[num[i] - '0'][r][col] != '#')
+					continue;
+				int px = x0 + i * 8 + col * 2, py = y0 + r * 2;
+				uint16_t c = px < bx + 1 + fill ? BLACK : WHITE;
+				rect(px, py, 2, 2, c);
+			}
+}
+
+/* Vibrate only and silent: a phone buzzing, a speaker struck */
+static const char *vib_icon[] = {
+	"..#####..",
+	"..#...#..",
+	"#.#...#.#",
+	".##...##.",
+	"#.#...#.#",
+	".##...##.",
+	"#.#...#.#",
+	"..#...#..",
+	"..#####..",
+};
+static const char *silent_icon[] = {
+	"....#.....",
+	"...##.....",
+	"####.#...#",
+	"####..#.#.",
+	"####...#..",
+	"####..#.#.",
+	"####.#...#",
+	"...##.....",
+	"....#.....",
+};
+
+/* 0 sounds on, 1 vibrate only, 2 silent: the phone's settings */
+static int quiet_mode(void)
+{
+	char line[128];
+	bool sounds = true, vib = true;
+	FILE *f = fopen("/var/lib/s22/settings", "re");
+
+	while (f && fgets(line, sizeof(line), f)) {
+		if (!strncmp(line, "sounds=off", 10))
+			sounds = false;
+		else if (!strncmp(line, "sounds=on", 9))
+			sounds = true;
+		else if (!strncmp(line, "ring_volume=", 12) && atoi(line + 12) == 0)
+			sounds = false;
+		else if (!strncmp(line, "vibrate=off", 11))
+			vib = false;
+		else if (!strncmp(line, "vibrate=on", 10))
+			vib = true;
+	}
+	if (f)
+		fclose(f);
+	return sounds ? 0 : vib ? 1 : 2;
+}
+
+/* -1 off, 0 on, 1 a device connected: s22-btd's state, else the links */
+static int bt_state(void)
+{
+	char line[64];
+	int powered = -1, connected = 0;
+	FILE *f = fopen("/run/s22-bt/state", "re");
+
+	if (!f)
+		return bt_link() ? 1 : -1;
+	while (fgets(line, sizeof(line), f)) {
+		sscanf(line, "powered=%d", &powered);
+		sscanf(line, "connected=%d", &connected);
+	}
+	fclose(f);
+	return powered != 1 ? -1 : connected > 0 ? 1 : 0;
 }
 
 /* Notifications, newest first; cursor = the one shown (0 = newest) */
@@ -663,20 +762,23 @@ static void draw(void)
 	bars = cell_bars();
 	if (bars >= 0)
 		signal_bars(20, bars);
-	if (bt_connected())
+	n = bt_state();		/* grey when on, blue with a device */
+	if (n >= 0)
 		for (i = 0; i < 11; i++)
 			for (x = 0; x < 7; x++)
 				if (bt_rune[i][x] == '#')
-					pixel(40 + x, 3 + i, BLUE);
+					pixel(40 + x, 3 + i, n ? BLUE : GREY);
+	n = quiet_mode();
+	if (n)
+		for (i = 0; i < 9; i++)
+			for (x = 0; x < 10; x++) {
+				const char *row = n == 1 ? vib_icon[i] : silent_icon[i];
+				if (x < (int)strlen(row) && row[x] == '#')
+					pixel(52 + x, 4 + i, WHITE);
+			}
 	cap = battery(&charging);
 	if (cap >= 0) {
-		rect(103, 4, 20, 10, WHITE);		/* outline */
-		rect(104, 5, 18, 8, BLACK);
-		rect(123, 7, 2, 4, WHITE);		/* nub */
-		w = (cap * 18 + 50) / 100;
-		rect(104, 5, w, 8, charging ? YELLOW : cap <= 20 ? RED : GREEN);
-		snprintf(buf, sizeof(buf), "%d%%", cap);
-		text8(101 - (int)strlen(buf) * 8, 1, buf, WHITE);
+		battery_icon(cap > 100 ? 100 : cap, charging);
 	}
 
 	/* Clock, the 8x16 font at 2x: 12-hour without a leading zero and a

@@ -32,7 +32,10 @@
  * highlighted. At a password prompt (no echo, line mode) it also
  * shows one '*' per character typed on the line. Only the character being
  * chosen is ever shown, and only until it is final. It clears itself after
- * a few seconds without typing. -q turns it off.
+ * a few seconds without typing. -q turns it off. Under the GUI's text mode
+ * the same goes to OUTDIR/tap for the status bar (s22-statusbar): the mode
+ * on the first line, and while a key is being tapped a second line
+ * "KEY<TAB>INDEX<TAB>CHARACTERS"; empty when the GUI is not in text mode.
  *
  * The keypad backlight (LED class device, default white:kbd_backlight)
  * comes on at a key press and goes off BACKLIGHT_MS after the last one
@@ -402,6 +405,48 @@ static void indicator(void)
 	ind_clear_at = now_ms() + IND_IDLE_MS;
 }
 
+/* ------------------------------------------------- the GUI's indicator --- */
+
+static enum front_kind { FK_CONSOLE, FK_GUI_TEXT, FK_GUI_RAW } front_kind(void);
+
+/* OUTDIR/tap, rewritten only when it changes */
+static void gui_indicator(void)
+{
+	static char last[192] = "\1";
+	char text[192] = "", path[256], tmp[260];
+	int w = 0;
+	FILE *f;
+
+	if (front_kind() == FK_GUI_TEXT) {
+		w = snprintf(text, sizeof(text), "%s%s\n", mode_name[mode],
+			     ctrl_armed ? " ^" : "");
+		if (pend.key) {
+			const char *list = tap_list(pend.key);
+			w += snprintf(text + w, sizeof(text) - w, "%c\t%d\t",
+				      pend.key == KEY_NUMERIC_STAR ? '*' :
+				      pend.key == KEY_0 ? '0' : '1' + (pend.key - KEY_1),
+				      pend.index);
+			for (int i = 0; list[i] && w < (int)sizeof(text) - 2; i++)
+				text[w++] = apply_case(list[i]);
+			text[w++] = '\n';
+			text[w] = 0;
+		} else if (flash.c) {
+			snprintf(text + w, sizeof(text) - w, "%c\t0\t%c\n", flash.c, flash.c);
+		}
+	}
+	if (strcmp(text, last) == 0)
+		return;
+	snprintf(path, sizeof(path), "%s/tap", outdir);
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	f = fopen(tmp, "w");
+	if (!f)
+		return;
+	fputs(text, f);
+	fclose(f);
+	rename(tmp, path);
+	snprintf(last, sizeof(last), "%s", text);
+}
+
 /* ------------------------------------------------------ key handling --- */
 
 static int held_key;		/* a tap key being held, for long press */
@@ -436,6 +481,13 @@ static enum front front(void)
 		buf[0] = 0;
 	close(fd);
 	return strncmp(buf, "raw", 3) == 0 ? F_GUI_RAW : F_GUI_TEXT;
+}
+
+static enum front_kind front_kind(void)
+{
+	enum front f = front();
+
+	return f == F_GUI_TEXT ? FK_GUI_TEXT : f == F_GUI_RAW ? FK_GUI_RAW : FK_CONSOLE;
 }
 
 /* Home under the GUI's text mode: Home when tapped, Tab when held */
@@ -780,6 +832,7 @@ int main(int argc, char **argv)
 		timers();
 		if (dirty) {
 			indicator();
+			gui_indicator();
 			dirty = false;
 		}
 	}
