@@ -9,7 +9,7 @@
 ![SoC](https://img.shields.io/badge/SoC-Qualcomm%20QM215-3253dc)
 ![Kernel](https://img.shields.io/badge/kernel-7.1%20(msm89x7)-2ea44f)
 ![Bootloader](https://img.shields.io/badge/boots%20via-lk2nd-orange)
-![Status](https://img.shields.io/badge/status-daily%20bring--up-yellow)
+![Status](https://img.shields.io/badge/status-working%2C%20development%20paused-lightgrey)
 
 **[Getting started →](GETTING-STARTED.md)** &nbsp;·&nbsp;
 **[Hardware notes →](HARDWARE.md)**
@@ -21,26 +21,31 @@ Cortex-A53 cores, 2 GB of RAM, LTE, WiFi, two screens, a keypad, sensors and
 a battery that idles for days. This repository has everything learned about
 it, plus the tools and bring-up scripts to run mainline Linux on it.
 
+It works as a daily phone: calls, texts, mobile data, WiFi, Bluetooth, both
+screens, the cameras and the sensors all run on mainline. Development is
+paused as of October 2026; everything below is the state it was left in.
+
 ## What works
 
 | | Hardware | Status |
 |---|---|---|
 | ✅ | **CPU, RAM** | 4× A53 at stock's 1.21 GHz (this chip's speed bin), 2 GB |
-| ✅ | **Main display** | 480×640 ST7701S on MSM DRM/DSI with a real panel driver, backlight control |
+| ✅ | **Main display, GPU** | 480×640 ST7701S on MSM DRM/DSI with a real panel driver, backlight control; Adreno 308 (freedreno, OpenGL ES 3.0) at its fused 400 MHz |
+| ✅ | **Touchscreen** | Chipsemi CHSC, multi-touch |
 | ✅ | **Outer display** | 128×128 SPI panel (`panel-mipi-dbi`) |
-| ✅ | **Keypad** | Full matrix, D-pad, soft keys, volume, power, lid switch |
-| ✅ | **WiFi** | WCN3610, 2.4 GHz 802.11n: WPA2, DHCP, HTTPS |
+| ✅ | **Keypad** | Full matrix, D-pad, soft keys, side key, speaker key, volume, power, lid switch |
+| ✅ | **WiFi, Bluetooth** | WCN3610, 2.4 GHz 802.11n; Bluetooth LE and classic, A2DP audio smooth during WiFi traffic after coexistence tuning |
 | ✅ | **Audio** | Earpiece, both microphones, loudspeaker (AW88194A amp with its DSP) |
+| ✅ | **Calls, SMS, mobile data** | VoLTE calls (call audio on the ADSP, earpiece or speakerphone), sending and receiving texts, IPv6 mobile data; tested with a T-Mobile-network SIM |
 | ✅ | **Sensors** | Accelerometer, proximity, light, pressure (through the ADSP, `s22-sensord`) |
-| ✅ | **Modem** | Boots, QMI, goes online and measures LTE cells (no SIM tested yet) |
+| ✅ | **Cameras, flash** | Rear GC5035 with DW9714 autofocus and front GC02M2, raw through CAMSS; flash LED as a torch. Colour balance still needs tuning |
+| ✅ | **Video** | Venus: H.264, HEVC and VP8 decoding, H.264 encoding (V4L2) |
+| ✅ | **Vibration motor** | PM8916 vibrator, patterns through force feedback |
 | ✅ | **USB-C** | Charging, battery level, USB networking (WUSB3801 Type-C) |
-| ✅ | **Suspend** | s2idle; wakes on power key, lid, keypad, RTC |
-| ✅ | **Bluetooth** | Keyboards (LE) and audio (A2DP to speakers/headphones); audio stutters during WiFi transfers (shared radio, tuning pending) |
-| 🟡 | **Calls, SMS, mobile data** | Modem-side IMS and a T-Mobile profile are present; needs a SIM to test |
-| 🟡 | **Vibration motor** | Detected; not tested |
+| ✅ | **Power** | s2idle suspend (wakes on power key, lid, keypad, RTC); the SoC reaches VDD minimisation when idle, and the modem sleeps ~98% of the time |
 | 🟡 | **Wired headset** | No 3.5 mm jack: analog audio over USB-C through an FSA4480 switch, passive adapters only; not supported yet |
 | 🟡 | **USB host (OTG)** | Probably data-capable, but the phone cannot power the port |
-| ❌ | **Cameras, flash LED, video decoding (Venus), touchscreen, FM radio** | Not started |
+| ❌ | **GPS, FM radio** | Not started |
 
 ## Typing with 12 keys
 
@@ -111,21 +116,23 @@ walks through it step by step.
 | `tools/s22sh` | Run a command on the bring-up image over telnet |
 | `tools/mkrootfs.sh` | Build the Alpine aarch64 toolbox the bring-up image fetches into RAM over USB |
 | `tools/phone/` | Phone-side scripts: EFS into RAM, `rmtfs`, start the modem |
-| `tools/s22-sensord.c` | The sensor daemon: registry and time services for the ADSP, sensor streams as input devices and files |
+| `tools/s22-sensord.c` | The sensor daemon: registry and time services for the ADSP; sensors run on demand while a client holds them, as input devices and files |
+| `tools/s22-sensor` | Hold sensors from `s22-sensord` and print their readings |
 | `tools/sns-reg-serve.c`, `tools/qmisend.c`, `tools/sns-reg-groups.py` | Sensor-registry server, raw QMI tool, group-table extractor |
 | `tools/mkstockref.sh` | Build a stock-kernel reference image (for comparing against stock behaviour; options for prima WiFi traces, crash-dump mode, modem firmware) |
 | `tools/s22-t9d.c` | Keypad text input: multi-tap letters, modes, Ctrl, a console indicator, the keypad backlight ([reference](docs/KEYPAD.md)) |
 | `tools/s22-lidd.c` | Main display off while the lid is closed; runs hooks on lid changes and after resume |
 | `tools/s22-lidd.d/` | Lid hooks: WiFi power save off with the lid open, on with it closed |
 | `tools/s22-outerd/` | Outer display status screen (clock, date, WiFi, Bluetooth, battery, notification ticker, wallpaper); owns the lid-closed keys: side = browse/dismiss notifications, volume = media through a hook |
-| `tools/s22-notify/` | Notifications: `s22-notify` posts them (with a source), `s22-notifyd` vibrates with a per-source pattern |
+| `tools/s22-notify/` | Notifications: `s22-notify` posts them (with a source and a link), `s22-notifyd` plays a sound and a vibration pattern, chosen per app and per contact |
 | `tools/s22-smsd/` | Incoming text messages over QMI WMS (libqmi from Python): decoded, kept in an inbox file, posted as `sms` notifications, deleted from the modem; never starts mobile data |
 | `tools/s22-imsd/` | The AP side of the modem's IMS data connection (QMI service 770): brings up the IMS PDN when the modem's own IMS stack asks, without which the modem never sleeps |
 | `tools/s22-battery/` | Battery log every 5 minutes (charge, voltage, lid, modem and system sleep counters) and a one-shot clean power-off at 5%; keeps a smoothed capacity on top of the PM8916 voltage-mode gauge, which jumps with load |
-| `tools/s22-call/` | VoLTE calls without a GUI: rings, answers when the flip opens (or Call), hangs up when it closes (or End); holds the modem's hostless voice PCM (`s22-pcmhold`) and routes earpiece and keypad mic; `s22-call dial NUMBER\|answer\|hangup\|status` |
+| `tools/s22-call/` | VoLTE calls without a GUI: rings (ringtone and vibration), answers when the flip opens (or Call), hangs up when it closes (or End); holds the modem's hostless voice PCM (`s22-pcmhold`) and routes earpiece, speakerphone and keypad mic; ringback, mute, DTMF, voicemail, a call log; `s22-call dial NUMBER\|answer\|hangup\|speaker\|status` |
+| `tools/s22-celld/` | Cellular status for the screens (service, signal bars, operator), a registration watchdog, mobile data that stays off while WiFi works, and radio on/off |
 | `tools/openrc/s22-console.map` | Console keymap additions (`/etc/s22-console.map`, see `conf.d/keymaps`): volume and power keys stop typing escape codes into the tty |
 | `tools/s22-partguard` | Make the eMMC partitions a system does not need read-only, with eMMC power-on write protection |
-| `tools/openrc/` | OpenRC services for an installed system: partition guard, zram, clock, USB network, rmtfs, sensors, keypad, lid, outer display ([list](tools/openrc/README.md)) |
+| `tools/openrc/` | OpenRC services for an installed system: partition guard, zram, clock, USB network, rmtfs, tqftpserv, sensors, keypad, lid, outer display, notifications, battery, texts, IMS, calls, cellular, tailscaled ([list](tools/openrc/README.md)) |
 
 > [!IMPORTANT]
 > **No firmware is included, and none should be shared.** The modem, WiFi,
