@@ -3,6 +3,21 @@
 Collected 2026-10-02 over unrooted ADB (`collect.sh`; raw data in `dump/`).
 Firmware: `LTE_S02113.11_N_S22Flip_0.030.03` (V30), Android 11 (Go), kernel 4.9.227, security patch 2022-06-05.
 
+## Status (2026-10-08, development paused)
+
+Mainline Linux runs the phone as a daily device. Working: both displays and
+the GPU, the touchscreen, the keypad and lid, WiFi and Bluetooth, the
+earpiece, microphones and loudspeaker, VoLTE calls, SMS and mobile data,
+the sensors (through the ADSP), both cameras and the flash, Venus video,
+the vibrator, charging and suspend. The SoC reaches VDD minimisation when
+idle, and the modem sleeps about 98% of the time.
+
+Not done: the wired headset (USB-C analog), USB host power, GPS, FM radio,
+camera colour tuning, and WiFi throughput, which is still below stock.
+
+The sections below are the bring-up log in the order it happened. Dated
+notes record what was true then; "Update" notes give the later state.
+
 ## Platform
 
 | Item | Finding | Source |
@@ -21,31 +36,31 @@ Firmware: `LTE_S02113.11_N_S22Flip_0.030.03` (V30), Android 11 (Go), kernel 4.9.
 
 | Function | Hardware | Bus / location | Mainline status |
 |---|---|---|---|
-| Main display | 480×640 @ 60 Hz, MIPI DSI (`mdss_dsi_ctrl0`). The exact panel is not yet known. DT candidates for a VGA panel: `gc9503v_jutai_vga_video`, `st7701s_vga_video`, `rouxian_st7701s_boe_video`, `jd9161z_boe_ips_video`. | DSI0 | MDSS/DSI are supported. The panel driver must be generated from the downstream DTB (e.g. with linux-mdss-dsi-panel-driver-generator). **Needs boot.img.** |
+| Main display | 480×640 @ 60 Hz, MIPI DSI (`mdss_dsi_ctrl0`). The exact panel is not yet known. DT candidates for a VGA panel: `gc9503v_jutai_vga_video`, `st7701s_vga_video`, `rouxian_st7701s_boe_video`, `jd9161z_boe_ips_video`. | DSI0 | MDSS/DSI are supported. The panel driver must be generated from the downstream DTB (e.g. with linux-mdss-dsi-panel-driver-generator). **Working:** an ST7701S; a panel driver generated from the stock DT (see "Main display") |
 | Outer display | 128×128 @ 30 Hz, driven by MDSS SPI (`qcom,mdss_spi`). Its config comes from the stock dtbo overlay (entry 27), node `qcom,mdss_spi_st7789v2_qvga_cmd`. Despite the name, it is 128×128 and ST7735S-class. | `spi@7af6000` (spi6), CS1 | **Working** with `panel-mipi-dbi-spi`; see "Outer display" below. |
-| Touch (main display) | Chipsemi CHSC (`chsc_cap_touch`, driver `semi_touch`) | i2c-3 (`i2c@78b7000`) addr **0x2e**. Unpopulated alternatives in DT: goodix@14, tsc@24, focaltech@38. | **No mainline driver.** Needs a port. |
+| Touch (main display) | Chipsemi CHSC (`chsc_cap_touch`, driver `semi_touch`) | i2c-3 (`i2c@78b7000`) addr **0x2e**. Unpopulated alternatives in DT: goodix@14, tsc@24, focaltech@38. | **Working:** a Chipsemi CHSC driver in our kernel fork |
 | Keypad | `gpio-matrix-keypad`, plus `gpio-keys` (vol_up), PM8916 PON (power) and RESIN | GPIO | Mainline. Row/column GPIOs and keymap need the DTB. |
 | Hall sensor (lid) | `hall_sensor` GPIO input | GPIO | Use `gpio-keys` with `SW_LID`. |
 | Keypad backlight | `qcom,leds-gpio-keyboard_light` | GPIO | Use `gpio-leds`. |
-| Camera flash | `qcom,leds-gpio-flash` + `qcom,camera-gpio-flash` | GPIO | Use `gpio-leds` or `sgm3140` (as on the Nokia 2780). |
-| Vibrator | PM8916 vibrator @ c000 | SPMI | Mainline (`pm8xxx-vibrator`). |
+| Camera flash | `qcom,leds-gpio-flash` + `qcom,camera-gpio-flash` | GPIO | **Working:** `sgm3140`, as on the Nokia 2780 (flash and torch) |
+| Vibrator | PM8916 vibrator @ c000 | SPMI | **Working:** mainline `pm8xxx-vibrator` (force feedback) |
 | Audio codec | PM8916 analog codec (`analog-codec@f000`) + MSM digital codec, `msm8952-asoc-wcd` card "msm8952-snd-card-mtp", ADSP (Q6/APR) | SPMI + LPASS | Mainline (`msm8916-wcd-analog/digital`, qdsp6). |
-| Speaker amplifier | **Awinic AW881xx smart PA** (driver bound) | i2c-5 (`i2c@7af5000`) addr **0x34** | Mainline has aw88395/aw88261/aw88399/aw88081. The exact AW881xx variant needs checking. |
+| Speaker amplifier | **Awinic AW881xx smart PA** (driver bound) | i2c-5 (`i2c@7af5000`) addr **0x34** | **Working:** an AW88194A, with our own driver (`aw88194.c`; see "Loudspeaker") |
 | Speaker amplifier (alt) | Awinic AW8155 GPIO class-D amp (`soc:aw8155`) | GPIO | `simple-audio-amplifier` / `aw8738`-style pulse mode. |
 | Headset | 3.5 mm jack with MBHC (Headset Jack + Button Jack inputs) | PM8916 codec | Mainline. |
 | USB-C | **WillSemi WUSB3801** Type-C controller | i2c-5 addr **0x60** | Mainline (`wusb3801`). |
 | USB-C audio switch | FSA4480 in DT, **not bound** (probably not populated) | i2c-5 addr 0x42 | Mainline (`fsa4480`). |
 | USB | ChipIdea HS OTG (`78db000.usb`, `msm_otg`) | | Mainline (`ci_hdrc_msm`). |
-| WiFi/BT/FM | WCNSS: Pronto core (`a21b000`) + iris RF chip (probably **WCN3615/3620**, as on other QM215 boards). BT over SMD, FM via `iris-fm`. | | Mainline (`wcn36xx`, `qcom_wcnss_iris`, `btqcomsmd`). Needs the device's signed `wcnss.mdt` and NV. |
-| Modem | Q6v5 MSS (`4080000.qcom,mss`), BAM-DMUX data, MPSS `SDM439_GENNS_PACK` 3-00078. LTE/GSM/CDMA/IMS features. | | Mainline (`qcom_q6v5_mss`, `bam-dmux`, qrtr). ModemManager works on msm8916-family boards, but not on this one (no network port, see "Modem with a SIM"). SMS works over QMI WMS. VoLTE calls are hard; data is feasible. |
-| GNSS | Via modem (`android.hardware.location.gps`) | | Feasible through the modem's QMI loc service. |
+| WiFi/BT/FM | WCNSS: Pronto core (`a21b000`) + iris RF chip (probably **WCN3615/3620**, as on other QM215 boards). BT over SMD, FM via `iris-fm`. | | **WiFi and Bluetooth working:** a **WCN3610** (not 3615/3620), on `wcn36xx` with the pending WCN3610 series, `btqcomsmd`; the device's own `wcnss.mdt` and NV. FM: not started |
+| Modem | Q6v5 MSS (`4080000.qcom,mss`), BAM-DMUX data, MPSS `SDM439_GENNS_PACK` 3-00078. LTE/GSM/CDMA/IMS features. | | Mainline (`qcom_q6v5_mss`, `bam-dmux`, qrtr). ModemManager works on msm8916-family boards, but not on this one (no network port, see "Modem with a SIM"). SMS works over QMI WMS. **Update 2026-10-08:** VoLTE calls, SMS and mobile data all work (see "Modem with a SIM") |
+| GNSS | Via modem (`android.hardware.location.gps`) | | Feasible through the modem's QMI loc service; not started |
 | NFC | `nqx` HAL configured and a `pinctrl/nfc` node exists, but **no NFC feature is reported and no NFC i2c device is bound**, so it is likely absent. | | n/a |
-| Rear camera | **GalaxyCore GC5035** 5 MP + **DW9714** VCM + `gc5035_otp` EEPROM | CCI `camera@0`, `actuator@0`, CSIPHY | `gc5035` is in the msm89x7 tree (used by Nokia 2780). `dw9714` is mainline. CAMSS 8x17 is enabled in that tree. |
-| Front camera | **GalaxyCore GC02M2** 2 MP | CCI `camera@1` | **No mainline driver.** Needs a port. |
-| Accelerometer | Sensortek **STK8BA53** @ 0x18 | **BLSP i2c bus 4, owned by the ADSP sensor core (SSC)** | `stk8ba50` IIO driver (check compatibility). Linux control of the bus is untested. |
-| Light/proximity | Sensortek **STK3x1x** @ 0x48 (alternate LTR55x @ 0x23) | same, ADSP | `stk3310` IIO driver |
-| Pressure | InvenSense **ICP-10100** @ 0x63 (alternate SPL06 @ 0x77) | same, ADSP | `icp10100` IIO driver |
-| Video codec | Venus (`1d00000.qcom,vidc`) | | Mainline (venus, msm8916-class) |
+| Rear camera | **GalaxyCore GC5035** 5 MP + **DW9714** VCM + `gc5035_otp` EEPROM | CCI `camera@0`, `actuator@0`, CSIPHY | `gc5035` is in the msm89x7 tree (used by Nokia 2780). `dw9714` is mainline. CAMSS 8x17 is enabled in that tree. **Working:** raw frames through CAMSS's RDI path, autofocus with the DW9714; colour balance still needs tuning |
+| Front camera | **GalaxyCore GC02M2** 2 MP | CCI `camera@1` | **Working:** a `gc02m2` driver in our kernel fork (fixed focus) |
+| Accelerometer | Sensortek **STK8BA53** @ 0x18 | **BLSP i2c bus 4, owned by the ADSP sensor core (SSC)** | `stk8ba50` IIO driver (check compatibility). **Working through the ADSP** (`s22-sensord`, see "Sensors through the ADSP"); the bus stays the ADSP's, since touching it from Linux resets the phone |
+| Light/proximity | Sensortek **STK3x1x** @ 0x48 (alternate LTR55x @ 0x23) | same, ADSP | **Working through the ADSP** (`s22-sensord`) |
+| Pressure | InvenSense **ICP-10100** @ 0x63 (alternate SPL06 @ 0x77) | same, ADSP | **Working through the ADSP** (`s22-sensord`) |
+| Video codec | Venus (`1d00000.qcom,vidc`) | | **Working:** mainline venus with the phone's own `venus.mbn` (H.264, HEVC, VP8 decoding; H.264 encoding) |
 | Thermal | tsens @ 4a8000 | | Mainline |
 
 ## Linux feasibility: positive
@@ -56,12 +71,12 @@ Firmware: `LTE_S02113.11_N_S22Flip_0.030.03` (V30), Android 11 (Go), kernel 4.9.
 
 ### Work needed for this device
 
-1. **Main DSI panel driver.** Generate it from the downstream DT panel node (init commands and timings).
-2. **Outer 128×128 SPI display.** Configure `panel-mipi-dbi-spi` with the init sequence from DT/dtbo, and work out the CS/DC/reset GPIOs.
-3. **CHSC touch driver.** No mainline driver exists. The touchscreen is a secondary input on a keypad phone, so this is lower priority.
-4. **GC02M2 front camera driver.** Lower priority.
-5. **AW881xx speaker amp.** Identify the exact part and check it against the mainline Awinic drivers.
-6. **ADSP-owned sensors.** Either leave them on the ADSP (needs SSC/QMI userspace) or try driving BLSP1 i2c-4 from Linux.
+1. **Main DSI panel driver.** Generate it from the downstream DT panel node (init commands and timings). *Done.*
+2. **Outer 128×128 SPI display.** Configure `panel-mipi-dbi-spi` with the init sequence from DT/dtbo, and work out the CS/DC/reset GPIOs. *Done.*
+3. **CHSC touch driver.** No mainline driver exists. The touchscreen is a secondary input on a keypad phone, so this is lower priority. *Done: a driver in our kernel fork.*
+4. **GC02M2 front camera driver.** Lower priority. *Done: a driver in our kernel fork.*
+5. **AW881xx speaker amp.** Identify the exact part and check it against the mainline Awinic drivers. *Done: an AW88194A, with our own driver.*
+6. **ADSP-owned sensors.** Either leave them on the ADSP (needs SSC/QMI userspace) or try driving BLSP1 i2c-4 from Linux. *Done: left on the ADSP, with our own daemon (`s22-sensord`).*
 
 ## What could not be collected without root, and how to get it
 
@@ -146,10 +161,10 @@ Booted with `fastboot boot` through lk2nd: kernel `msm89x7/7.1.3` + WCN3610 v3 p
 | USB host (OTG) | **Probably data-capable, but no VBUS.** Stock sets the controller to OTG (`qcom,hsusb-otg-mode = 3`) and the WUSB3801 to dual-role (`drp-toggle-time`, `host-current`), but the USB node has no VBUS supply and the PM8916 linear charger has no OTG boost; no external 5 V boost regulator exists in the stock DT. Devices (even self-powered hubs) normally wait for host VBUS before connecting, so host mode would need an adapter that injects external 5 V, outside the Type-C spec. Untested. Bluetooth is the simpler route for a keyboard |
 | Headset (USB-C analog) | **No 3.5 mm jack: audio over USB-C.** Stock has an **FSA4480** analog switch (`qcom,fsa4480-i2c`, I²C `0x7af5000` @ 0x42, the WUSB3801's bus), `qcom,msm-mbhc-usbc-audio-supported`, and two "USB-C analog enable" GPIOs (`msm_cdc_pinctrl_cdc_usbc_audio_en1`/`en2`). Mainline has `fsa4480` (Type-C mode switch, not enabled yet) and `wusb3801` already reports `TYPEC_ACCESSORY_AUDIO`. Needs: the FSA4480 node linked to the Type-C port, the enable GPIOs, PM8916 MBHC detection and buttons, a mixer path. Only **passive** adapters/earbuds can work (digital USB-C audio needs host VBUS). Untested |
 | Outer display | Works: `panel-mipi-dbi` on SPI CS1, built-in driver, boot splash drawn by init (see below) |
-| Modem | **Registers on LTE and receives SMS** (see "Modem" and "Modem with a SIM" below): boots, QMI over QRTR, IMEI and firmware revision match stock, picks the carrier's MCFG profile itself. Calls and data not yet; bam-dmux never comes up |
+| Modem | **Registers on LTE and receives SMS** (see "Modem" and "Modem with a SIM" below): boots, QMI over QRTR, IMEI and firmware revision match stock, picks the carrier's MCFG profile itself. Calls and data not yet; bam-dmux never comes up. **Update 2026-10-08:** calls, texts both ways and mobile data work; bam-dmux comes up once the AP asks for it and opens the port (see "Modem with a SIM") |
 | Sensors (ADSP) | **Accelerometer, proximity, light and pressure all work** through the ADSP with our own daemon `s22-sensord` (see "Sensors through the ADSP"). The sensor bus is locked to the ADSP |
 | Audio | **Earpiece, both built-in mics and the loudspeaker work** (see "Audio" below): ADSP + QDSP6 sound card `cat-s22flip`, PM8916 codec, AW88194A amp on Quinary MI2S with our own driver, speaker protection DSP running. Headset jack untested |
-| Venus | Needs `venus.mbn`, which isn't in the ramdisk. Disabled in our DT until then: a Venus that never probes blocks GCC's sync_state, which kept the display power domain on |
+| Venus | Needs `venus.mbn`, which isn't in the ramdisk. Disabled in our DT until then: a Venus that never probes blocks GCC's sync_state, which kept the display power domain on. **Update 2026-10-07:** enabled with the phone's own `venus.mbn` and the `venus_mem` carve-out; decoding and encoding work |
 
 lk2nd (msm8952) ignores boot header addresses: kernel at `0x80080000`, DTB at `0x83400000`, ramdisk at `0x83600000`. The ramdisk must end below the reserved region at `0x85b00000`.
 
@@ -222,11 +237,13 @@ EFS from files, tqftpserv for the MCFG indexes):
   find a net port in the QMI modem". Its QMI modems need a network port, and
   the `bam-dmux` netdevs only appear once the modem raises its SMSM
   power-collapse bit, which this firmware never does, online or not, with or
-  without a SIM. The AT port (`wwan0at0`) answers `AT+CPIN?`/`AT+CFUN?` but
+  without a SIM. (Update: it raises the bit only when the AP asks first; see
+  "Bringing up data on bam-dmux" below. ModemManager was not tried again.) The AT port (`wwan0at0`) answers `AT+CPIN?`/`AT+CFUN?` but
   has no SMS commands.
 - **Data:** WDS reports `disconnected` (nothing on the Linux side can use the
   LTE default bearer without bam-dmux), and the firmware refuses the
-  autoconnect query (`InvalidOperation`).
+  autoconnect query (`InvalidOperation`). (Update 2026-10-08: mobile data
+  works; see the last item.)
 - **Phone number:** `qmicli --dms-get-msisdn` reads the number the network
   wrote to the SIM.
 - **Why the modem never slept (2026-10-06):** its own IMS stack asks the AP
@@ -259,6 +276,12 @@ EFS from files, tqftpserv for the MCFG indexes):
   only after a DPM open port (control `DATA5_CNTL`, hardware data port
   bam-dmux endpoint 0). Then: WDA raw-IP with that endpoint, WDS bind mux
   data port, start network.
+- **Mobile data (2026-10-08):** the internet PDN (WDS profile 1) runs on
+  bam-dmux channel 1, beside the IMS PDN on channel 0. Each channel opens,
+  and its `wwan` interface appears, only once its own DPM port is open
+  (`DATA5_CNTL` is channel 0, `DATA6_CNTL` channel 1). The network is
+  IPv6-only: an IPv4 call gets a 464XLAT placeholder address (192.0.0.2),
+  and IPv4-only names arrive as DNS64 addresses.
 
 ## Main display (working, 2026-10-03)
 
@@ -403,6 +426,13 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
   board XO and never votes XO in the RPM's sleep set, which downstream's
   peripheral clocks do. The RPM-notifying state is out again until GCC
   holds that vote.
+  Update 2026-10-06: fixed. GCC and the other real XO users now take XO
+  from the RPM's XO clock, which votes in both sets while enabled, and
+  idle hardware lets go of it: the digital codec's AHB stand-in is back
+  on the board clock, and the USB glue runtime-suspends without a cable.
+  With the lid closed and the cable out, the RPM reached VDD minimisation
+  8137 times in 10 minutes, with the cluster state kept. Lazy RCU, PSI off
+  and sensors on demand cut the remaining idle wakeups.
   Also: cpuidle-psci creates its device once, and gave up when the CPU power
   domains (now waiting for the MPM) were not there yet; ours retries.
   Display wedge on lid open (2026-10-05): "hw recovery is not complete for
@@ -425,17 +455,16 @@ The accelerometer, light/proximity and pressure sensors sit on BLSP1 I²C-4 (0x7
   MBHC (see the table above); needs a passive USB-C to 3.5 mm adapter.
 - **FM radio:** the WCNSS iris receiver; no mainline driver. The antenna is
   probably the USB-C headset cable.
-- **Touchscreen:** Chipsemi CHSC (needs a driver).
-- **Cameras:**
-  - rear GC5035 + DW9714 (CAMSS/CCI)
-  - flash LED
-  - front GC02M2 (needs a driver)
-- **Smaller items:** Venus (enable `venus_mem`, add firmware),
-  a UCM profile for the built-in audio. (Keypad backlight: done, GPIO LED
+- **GPS:** through the modem's QMI location service; not started.
+- **Cameras:** both work (rear GC5035 with DW9714 autofocus, front GC02M2,
+  flash as a torch); automatic white balance leaves a red tint and needs
+  tuning.
+- **Smaller items:** a UCM profile for the built-in audio. (Done: the
+  touchscreen, Venus, the keypad backlight as GPIO LED
   `white:kbd_backlight`, lit by s22-t9d on key presses.)
-- **Modem with a SIM:** registration and SMS work. Calls, data and the
-  modem's sleep are next; data needs bam-dmux. The modem has modem-side IMS
-  and carrier profiles, so VoLTE looks possible.
+- **Modem with a SIM:** done. Registration, SMS both ways, VoLTE calls,
+  mobile data and the modem's sleep all work (see "Modem with a SIM").
+  Not done: MMS and GPS.
 
 ## Contents of `dump/`
 
